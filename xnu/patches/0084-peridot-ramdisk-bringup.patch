@@ -4,41 +4,41 @@
  	machine_timeout_bsd_init();
  #endif /* DEVELOPMENT || DEBUG */
  
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
 +	{
 +		/*
 +		 * Peridot boots from the ram disk (rd=md0): the UFS root path
-+		 * that normally chains the SWEET bring-up (keys, touch, USB)
++		 * that normally chains the PERIDOT bring-up (keys, touch, USB)
 +		 * never runs, so start the device side of it here. Bring-up
 +		 * that needs a writable partition (the persistent log) is
 +		 * skipped by the function itself when there is none.
 +		 */
-+		extern void sweet_peridot_bringup(void);
-+		sweet_peridot_bringup();
++		extern void peridot_bringup(void);
++		peridot_bringup();
 +	}
 +#endif
 +
  	bsd_init_kprintf("done\n");
  }
  
---- a/bsd/dev/sweet_ufs.c
-+++ b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/peridot_ufs.c
++++ b/bsd/dev/peridot_ufs.c
 @@ -820,4 +820,18 @@
  	*dev = su.bdev;
  	return 0;
  }
 +
 +/*
-+ * Peridot boots from the ram disk (rd=md0), so sweet_ufs_rootdev() never
-+ * runs and the chain at the end of sweet_ufs_init() would never start the
++ * Peridot boots from the ram disk (rd=md0), so peridot_ufs_rootdev() never
++ * runs and the chain at the end of peridot_ufs_init() would never start the
 + * USB device (bsd_init() calls this before userspace). When a UFS root did
 + * run, su.ready is set and everything was already brought up.
 + */
 +void
-+sweet_peridot_bringup(void)
++peridot_bringup(void)
 +{
 +	if (!su.ready) {
-+		sweet_usb_probe();
++		peridot_usb_probe();
 +	}
 +}
- #endif /* ARM64_BOARD_CONFIG_SWEET */
+ #endif /* ARM64_BOARD_CONFIG_PERIDOT */

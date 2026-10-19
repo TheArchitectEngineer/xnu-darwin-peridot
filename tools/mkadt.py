@@ -185,8 +185,8 @@ def build(seed=None, ramdisk=False):
         ('stride', u32(FB_STRIDE)),
     ])
 
-    # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running.
-    ufs = node('sweet-ufs', [
+    # bsd/dev/peridot_ufs.c: the UFS host ABL leaves running.
+    ufs = node('peridot-ufs', [
         ph(),
         ('compatible', cstr('qcom,ufshc')),
         ('reg', u64(UFS, UFS_SIZE)),

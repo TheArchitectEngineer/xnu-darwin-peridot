@@ -1,0 +1,130 @@
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -63,6 +63,12 @@
+ 	{ "phy-com-aux", 0x39064 },
+ };
+ 
++#define GCC_USB30_PRIM_BCR      0x39000         /* gcc-cliffs.c reset map */
++#define GCC_QUSB2PHY_PRIM_BCR   0x12000
++#define TCSRCC_PA               0x01f40000      /* DT clock-controller@1f40000 */
++#define TCSRCC_SIZE             0x000c0000
++#define TCSR_USB2_CLKREF_EN     0x000b1118      /* tcsrcc-pineapple.c */
++
+ #define DWC3_PA                 0x0a600000
+ #define DWC3_SIZE               0x0000d000
+ #define EUSB2_PHY_PA            0x088e3000      /* DT hsphy@88e3000 */
+@@ -76,6 +82,93 @@
+ 	return v;
+ }
+ 
++static void
++usb_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static void
++phy_rmw(vm_offset_t phy, uint32_t off, uint32_t mask, uint32_t val)
++{
++	usb_wr(phy, off, (usb_rd(phy, off) & ~mask) | (val & mask));
++}
++
++/*
++ * ABL hands the controller over with the USB30_PRIM block and eUSB2 PHY
++ * resets asserted (the GDSC and GCC clocks stay on). The DWC3 register file
++ * then reads back garbage (GSNPSID 0x33313130 instead of 0x5533xxxx) and the
++ * device soft reset never completes. Bring both blocks out of reset, open
++ * the PHY reference gate and run the PHY init sequence from the downstream
++ * phy-msm-snps-eusb2.c driver (19.2 MHz reference from the RPMH CXO pad).
++ * The repeater and PHY supplies stay as ABL left them.
++ */
++static void
++peridot_usb_power_on(vm_offset_t gcc)
++{
++	vm_offset_t tcsr, phy;
++
++	usb_wr(gcc, GCC_USB30_PRIM_BCR, 1);
++	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 1);
++	delay(1000);
++	usb_wr(gcc, GCC_USB30_PRIM_BCR, 0);
++	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 0);
++	delay(1000);
++
++	tcsr = ml_io_map(TCSRCC_PA, TCSRCC_SIZE);
++	if (tcsr == 0) {
++		printf("PERIDOT USB: TCSRCC map failed\n");
++	} else {
++		usb_wr(tcsr, TCSR_USB2_CLKREF_EN,
++		    usb_rd(tcsr, TCSR_USB2_CLKREF_EN) | 1);
++		printf("PERIDOT USB: TCSR USB2 clkref 0x%08x\n",
++		    usb_rd(tcsr, TCSR_USB2_CLKREF_EN));
++	}
++
++	phy = ml_io_map(EUSB2_PHY_PA, EUSB2_PHY_SIZE);
++	if (phy == 0) {
++		printf("PERIDOT USB: eUSB2 PHY map failed\n");
++		return;
++	}
++	/* Register addresses and values from phy-msm-snps-eusb2.c. */
++	phy_rmw(phy, 0x94, 1u << 1, 1u << 1);           /* CFG0: CMN ctrl override */
++	phy_rmw(phy, 0x50, 1u << 1, 1u << 1);           /* UTMI_CTRL5: POR */
++	phy_rmw(phy, 0x54, (1u << 0) | (1u << 3),
++	    (1u << 0) | (1u << 3));                     /* COMMON0: enable|retain */
++	phy_rmw(phy, 0x130, 1u << 2, 1u << 2);          /* APB_ACCESS_CMD: reset */
++	phy_rmw(phy, 0x98, 1u << 6, 0);                 /* CMN_CTRL0: no burn-in */
++	phy_rmw(phy, 0xb8, 1u << 0, 1u << 0);           /* FSEL_SEL */
++	phy_rmw(phy, 0x54, 0x7u << 4, 0);               /* FSEL: 19.2 MHz */
++	phy_rmw(phy, 0x5c, 0xffu, 0x90);                /* PLL FB_DIV[7:0] */
++	phy_rmw(phy, 0x60, 0xfu, 0x1);                  /* PLL FB_DIV[11:8] */
++	phy_rmw(phy, 0x60, 0xfu << 4, 0);               /* PLL REF_DIV */
++	phy_rmw(phy, 0x58, 0xfeu, 0x1u << 1);           /* PLL CPBIAS */
++	phy_rmw(phy, 0x68, 0xfcu, 0x8u << 2);           /* PLL INT */
++	phy_rmw(phy, 0x68, 0x3u, 0x1);                  /* PLL GMP */
++	phy_rmw(phy, 0x6c, 0x1fu, 0x10);                /* PLL PROP */
++	phy_rmw(phy, 0x70, 0x7u, 0);                    /* PLL VCO */
++	phy_rmw(phy, 0x6c, 0x3u << 6, 0x1u << 6);       /* PLL VREF tune */
++	phy_rmw(phy, 0x64, 1u << 4, 1u << 4);           /* VBUS_DET_EXT_SEL */
++	phy_rmw(phy, 0x7c, 0x7u, 0);                    /* TX pre-emphasis */
++	phy_rmw(phy, 0x7c, 0x3u << 5, 0x2u << 5);       /* TX rise/fall */
++	phy_rmw(phy, 0x7c, 0x3u << 3, 0x1u << 3);       /* TX source impedance */
++	phy_rmw(phy, 0x78, 0x7u << 3, 0x3u << 3);       /* TX HS vref */
++	phy_rmw(phy, 0x78, 0x3u << 6, 0);               /* TX HS crossover */
++	usb_wr(phy, 0x58, 0x00);                        /* DT param-override-seq */
++	phy_rmw(phy, 0x64, (1u << 3) | (1u << 2),
++	    (1u << 3) | (1u << 2));                     /* USB2 suspend N */
++	phy_rmw(phy, 0x3c, 1u << 0, 1u << 0);           /* UTMI_CTRL0: SLEEPM */
++	phy_rmw(phy, 0x54, 1u << 1, 1u << 1);           /* COMMON0: SIDDQ_SEL */
++	phy_rmw(phy, 0x54, 1u << 2, 0);                 /* COMMON0: SIDDQ off */
++	phy_rmw(phy, 0x50, 1u << 1, 0);                 /* UTMI_CTRL5: POR off */
++	phy_rmw(phy, 0x64, 1u << 3, 0);                 /* suspend N sel off */
++	phy_rmw(phy, 0x94, 1u << 1, 0);                 /* CFG0: override off */
++	printf("PERIDOT USB: eUSB2 powered UTMI_CTRL0 0x%08x COMMON0 0x%08x CFG_CTRL_2 0x%08x CFG_CTRL_3 0x%08x\n",
++	    usb_rd(phy, 0x3c), usb_rd(phy, 0x54), usb_rd(phy, 0x5c),
++	    usb_rd(phy, 0x60));
++}
++
+ void
+ peridot_usb_probe(void)
+ {
+@@ -120,6 +213,9 @@
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+ 	if (enabled >= 2) {
++		peridot_usb_power_on(gcc);
++		printf("PERIDOT USB: after power-on GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
++		    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc704));
+ 		peridot_usb_gadget_start(dwc);
+ 	}
+ 	if (cbcr[0] & CBCR_CLK_OFF) {
+@@ -872,8 +968,8 @@
+ 	ud.dma_pa = ptoa_64(pn);
+ 	ud_if_create();
+ 
+-	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+-	dwc_wr(DCTL, DCTL_CSFTRST);
++	/* Device controller soft reset; keep halted and preserve the rest of DCTL. */
++	dwc_wr(DCTL, (dwc_rd(DCTL) & ~DCTL_RUN_STOP) | DCTL_CSFTRST);
+ 	int i;
+ 	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+ 		delay(1000);

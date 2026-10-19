@@ -1,7 +1,7 @@
---- a/bsd/dev/sweet_usb.c
-+++ b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
 @@ -2,13 +2,16 @@
-  * SWEET: USB bring-up, step 1 - read-only state probe.
+  * PERIDOT: USB bring-up, step 1 - read-only state probe.
   *
   * The phone's USB is a Synopsys DWC3 (USB 2.0 only, maximum-speed
 - * high-speed) at 0x0a600000 behind Qualcomm's dwc-usb3-msm wrapper, with a
@@ -15,14 +15,14 @@
 + * eUSB2 PHY at 0x088e3000; its power domain is the USB30_PRIM GDSC and its
 + * clocks come from GCC (offsets from the downstream gcc-cliffs.c driver).
 + * The wrapper register file is inside the DWC3 core_base window on this SoC
-+ * (dwc3-qcom.c ioremaps reg[0] as "qscratch"), unlike sweet's separate
++ * (dwc3-qcom.c ioremaps reg[0] as "qscratch"), unlike peridot's separate
 + * 0xa6f8800 block. ABL uses this controller for fastboot; this probe only
 + * reports what state it is left in after `fastboot boot`. It never writes a
 + * register, and it touches the DWC3 / PHY register blocks only when the GCC
 + * status registers say their power domain and clocks are on (an access to a
 + * gated block would hang).
   */
- #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #if defined(ARM64_BOARD_CONFIG_PERIDOT)
  #include <sys/param.h>
 @@ -43,27 +46,27 @@
  extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
@@ -65,12 +65,12 @@
  usb_rd(vm_offset_t base, uint32_t off)
 @@ -119,19 +122,20 @@
  	if (enabled >= 2) {
- 		sweet_usb_gadget_start(dwc);
+ 		peridot_usb_gadget_start(dwc);
  	}
 -	if (cbcr[5] & CBCR_CLK_OFF) {
--		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
+-		printf("PERIDOT USB: ahb2phy clock off; QUSB2 PHY not read\n");
 +	if (cbcr[0] & CBCR_CLK_OFF) {
-+		printf("SWEET USB: master clock off; eUSB2 PHY not read\n");
++		printf("PERIDOT USB: master clock off; eUSB2 PHY not read\n");
  		return;
  	}
 -	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
@@ -81,12 +81,12 @@
 -	/* DT qcom,qusb-phy-reg-offset order (Linux phy-msm-qusb-v2.c): PORT_TUNE1 0x240,
 -	 * PLL_COMMON_STATUS_ONE 0x1a0, PWR_CTRL1 0x210, INTR_CTRL 0x230,
 -	 * PLL_CORE_INPUT_OVERRIDE 0x0a8, TEST1 0x254. */
--	printf("SWEET USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
+-	printf("PERIDOT USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
 -	    usb_rd(phy, 0x1a0), usb_rd(phy, 0x210), usb_rd(phy, 0x240), usb_rd(phy, 0x254));
 +	/* eUSB2 PHY register addresses (downstream phy-msm-snps-eusb2.c):
 +	 * UTMI_CTRL0 0x3c, UTMI_CTRL5 0x50, HS_PHY_CTRL_COMMON0 0x54,
 +	 * CFG_CTRL_1 0x58, UTMI_PHY_CMN_CTRL0 0x98. */
-+	printf("SWEET USB: eUSB2 UTMI_CTRL0 0x%08x UTMI_CTRL5 0x%08x COMMON0 0x%08x CFG_CTRL_1 0x%08x CMN_CTRL0 0x%08x\n",
++	printf("PERIDOT USB: eUSB2 UTMI_CTRL0 0x%08x UTMI_CTRL5 0x%08x COMMON0 0x%08x CFG_CTRL_1 0x%08x CMN_CTRL0 0x%08x\n",
 +	    usb_rd(phy, 0x3c), usb_rd(phy, 0x50), usb_rd(phy, 0x54), usb_rd(phy, 0x58),
 +	    usb_rd(phy, 0x98));
  }
@@ -126,7 +126,7 @@
 -		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
 +	{
 +		uint32_t hs = usb_rd(dwc, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(dwc, QSCRATCH_SS_PHY_CTRL);
- 		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+ 		printf("PERIDOT USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
 -		    hs, ss, usb_rd(qs, 0x08));
 -		*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
 -		*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
@@ -134,7 +134,7 @@
 +		*(volatile uint32_t *)(dwc + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
 +		*(volatile uint32_t *)(dwc + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
  		__asm__ volatile ("dsb sy" ::: "memory");
- 		printf("SWEET USB: VBUS override on: HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x\n",
+ 		printf("PERIDOT USB: VBUS override on: HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x\n",
 -		    usb_rd(qs, QSCRATCH_HS_PHY_CTRL), usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
 +		    usb_rd(dwc, QSCRATCH_HS_PHY_CTRL), usb_rd(dwc, QSCRATCH_SS_PHY_CTRL));
  	}

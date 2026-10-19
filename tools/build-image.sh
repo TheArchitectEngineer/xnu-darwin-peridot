@@ -12,7 +12,7 @@
 #   4. MUDIR/build_uefi.py -d peridot — build the UEFI FD + tail blocks
 #   5. tools/check_payload.py — verify XNUKERN1 / XNUFDT01 / XNUROOT1
 #
-# Defaults: MUDIR=$HOME/mu-build/mu (or $MUDIR), KERNEL=kernel.development.sweet
+# Defaults: MUDIR=$HOME/mu-build/mu (or $MUDIR), KERNEL=kernel.development.peridot
 # from the CI artifact download dir, ROOT=/tmp/opencode/peridot-root.img build
 # by tools/hfsroot (see its header; /dev directory is required).
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
 MUDIR="${MUDIR:-/home/hoshikava/mu-build/mu}"
-KERNEL="${KERNEL:-/home/hoshikava/Downloads/xnu-kernel-art/kernel.development.sweet}"
+KERNEL="${KERNEL:-/home/hoshikava/Downloads/xnu-kernel-art/kernel.development.peridot}"
 ROOT="${ROOT:-/tmp/opencode/peridot-root.img}"
 ANDROID_NDK="${ANDROID_NDK:-/opt/android-ndk}"
 VENV="${VENV:-$(dirname "$MUDIR")/venv}"

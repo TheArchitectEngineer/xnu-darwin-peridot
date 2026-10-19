@@ -1,10 +1,10 @@
-diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+diff --git a/iokit/Kernel/arm/PeridotPlatformExpert.cpp b/iokit/Kernel/arm/PeridotPlatformExpert.cpp
 index 0631685..5ce265b 100644
---- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
-+++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+--- a/iokit/Kernel/arm/PeridotPlatformExpert.cpp
++++ b/iokit/Kernel/arm/PeridotPlatformExpert.cpp
 @@ -1,5 +1,5 @@
  /*
-- * Minimal device-tree platform expert for Redmi Note 10 Pro (sweet).
+- * Minimal device-tree platform expert for Redmi Note 10 Pro (peridot).
 + * Minimal device-tree platform expert for Poco F6 (peridot).
   * Uses XNU's normal platform, power-domain and nub initialization. Hardware
   * interrupt and power-management services are supplied by separate drivers.
@@ -15,14 +15,14 @@ index 92f3e26..8698f39 100644
 +++ b/iokit/KernelConfigTables.cpp
 @@ -38,13 +38,13 @@ const char * gIOKernelConfigTables =
      "   {"
-     "     'IOClass'         = SweetPlatformExpert;"
+     "     'IOClass'         = PeridotPlatformExpert;"
      "     'IOProviderClass' = IOPlatformExpertDevice;"
--    "     'IONameMatch'     = 'xiaomi,sweet';"
+-    "     'IONameMatch'     = 'xiaomi,peridot';"
 +    "     'IONameMatch'     = 'xiaomi,peridot';"
      "     'IOProbeScore'    = 10000:32;"
      "   },"
      "   {"
-     "     'IOClass'         = SweetCPU;"
+     "     'IOClass'         = PeridotCPU;"
      "     'IOProviderClass' = IOPlatformDevice;"
 -    "     'IONameMatch'     = 'qcom,kryo470';"
 +    "     'IONameMatch'     = 'qcom,kryo';"
@@ -33,17 +33,17 @@ index 92f3e26..8698f39 100644
      "   {"
      "     'IOClass'         = AppleCLCD;"
      "     'IOProviderClass' = IOPlatformDevice;"
--    "     'IONameMatch'     = 'sweet,display';"
+-    "     'IONameMatch'     = 'peridot,display';"
 +    "     'IONameMatch'     = 'peridot,display';"
      "   },"
      "   {"
-     "     'IOClass'         = SweetHIDButtons;"
+     "     'IOClass'         = PeridotHIDButtons;"
 diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
 index 06bb568..4695d86 100644
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -1828,22 +1828,32 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool
- #if defined(SWEET)
+ #if defined(PERIDOT)
  /*
   * The reserved low-globals/kernel region is excluded from VM allocation.
 - * Use the otherwise empty 32MB block above low globals and below gVirtBase
@@ -53,14 +53,14 @@ index 06bb568..4695d86 100644
 + * and below gVirtBase for a Normal-NC framebuffer alias that survives
 + * bootstrap TTBR0 teardown.
   */
-+#define SWEET_FB_PHYS 0xE3940000ULL
-+#define SWEET_FB_BLOCK (SWEET_FB_PHYS & ~(ARM_TT_L2_SIZE - 1))
- #define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
++#define PERIDOT_FB_PHYS 0xE3940000ULL
++#define PERIDOT_FB_BLOCK (PERIDOT_FB_PHYS & ~(ARM_TT_L2_SIZE - 1))
+ #define PERIDOT_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
  
  static void
- sweet_early_map_final(void)
+ peridot_early_map_final(void)
  {
- 	const vm_map_address_t va = SWEET_EARLY_FB_VA;
+ 	const vm_map_address_t va = PERIDOT_EARLY_FB_VA;
 -	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
  	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
 +	assert(va + 2 * ARM_TT_L2_SIZE <= gVirtBase);
@@ -70,11 +70,11 @@ index 06bb568..4695d86 100644
  	assert(*slot == ARM_TTE_EMPTY);
 -	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
 +	assert(slot[1] == ARM_TTE_EMPTY);
-+	slot[0] = SWEET_FB_BLOCK | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	slot[0] = PERIDOT_FB_BLOCK | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
 +	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
 +	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
 +	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
-+	slot[1] = (SWEET_FB_BLOCK + ARM_TT_L2_SIZE) |
++	slot[1] = (PERIDOT_FB_BLOCK + ARM_TT_L2_SIZE) |
 +	    ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
  	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
  	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
@@ -82,11 +82,11 @@ index 06bb568..4695d86 100644
 @@ -2189,8 +2199,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
  	ml_enable_monitor();
  
- #if defined(SWEET)
+ #if defined(PERIDOT)
 -	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
--	sweet_early_relocate(SWEET_EARLY_FB_VA);
+-	peridot_early_relocate(PERIDOT_EARLY_FB_VA);
 +	/* The final TTBR1 is live; re-point the console at the framebuffer alias. */
-+	sweet_early_relocate(SWEET_EARLY_FB_VA + (SWEET_FB_PHYS & (ARM_TT_L2_SIZE - 1)));
++	peridot_early_relocate(PERIDOT_EARLY_FB_VA + (PERIDOT_FB_PHYS & (ARM_TT_L2_SIZE - 1)));
  #endif
  	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
  
@@ -96,7 +96,7 @@ index 023086f..fc6d3f2 100644
 +++ b/osfmk/arm64/start.s
 @@ -515,10 +515,10 @@ LEXT(start_first_cpu)
  
- #if defined(SWEET)
+ #if defined(PERIDOT)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
 -	MOV64	x0, (0x9c000000 + 2368 * 4320)
 +	MOV64	x0, (0xE3940000 + 2680 * 4880)
@@ -104,23 +104,23 @@ index 023086f..fc6d3f2 100644
  	mov		x2, #32
 -	mov		x4, #4320
 +	mov		x4, #4880
- Lsweet_mark_row:
+ Lperidot_mark_row:
  	mov		x3, #64
  	mov		x5, x0
 @@ -680,19 +680,27 @@ Lkernelcache_base_found:
  
- #if defined(SWEET)
+ #if defined(PERIDOT)
  	/*
 -	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
 -	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
 -	 * create_bootstrap_mapping would replace the RAM L2 table.
--	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * PERIDOT uses 16K pages and all bring-up RAM is below 4GB, so the first
 -	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
 +	 * Splash framebuffer: two 32MB Normal-NC blocks in the EXISTING V=P
 +	 * L2 table. peridot's framebuffer at 0xE3940000 spans the 0xE2000000
 +	 * and 0xE4000000 blocks; RAM at 0x8C0000000 uses L2 indices 1120+ of
 +	 * the same table, so both are free. Another call to
-+	 * create_bootstrap_mapping would replace the RAM L2 table: SWEET uses
++	 * create_bootstrap_mapping would replace the RAM L2 table: PERIDOT uses
 +	 * 16K pages and all bring-up RAM is below 64GB, so the first V=P L2
 +	 * page is bootstrap_pagetables + 2*PGBYTES.
  	 */
@@ -141,10 +141,10 @@ index 023086f..fc6d3f2 100644
  #endif
  
  	/* Ensure TTEs are visible */
-diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+diff --git a/osfmk/arm64/peridot_early.c b/osfmk/arm64/peridot_early.c
 index 6928957..349c375 100644
---- a/osfmk/arm64/sweet_early.c
-+++ b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/peridot_early.c
++++ b/osfmk/arm64/peridot_early.c
 @@ -1,5 +1,5 @@
  /*
 - * Redmi Note 10 Pro bootstrap console. No allocation, locks, ADT parsing or
@@ -176,10 +176,10 @@ index 19f27cd..8c55697 100644
  /*****************************************************************************/
  
  /*
-- * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
+- * peridot: framebuffer "serial" for boards with no usable UART (the Redmi Note
 - * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
-- * the boot framebuffer described by the ADT node "sweet-fbcon":
-+ * sweet: framebuffer "serial" for boards with no usable UART (SWEET keeps
+- * the boot framebuffer described by the ADT node "peridot-fbcon":
++ * peridot: framebuffer "serial" for boards with no usable UART (PERIDOT keeps
 + * kprintf on the splash framebuffer instead of a serial port). Output is
 + * drawn onto the boot framebuffer described by the ADT node "peridot-fbcon":
   *   reg    = <phys size>       absolute physical address, not arm-io relative
@@ -189,18 +189,18 @@ index 19f27cd..8c55697 100644
  	uint32_t const *val;
  	unsigned int size;
  
--	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
+-	if (SecureDTFindEntry("name", "peridot-fbcon", &entry) != kSuccess ||
 +	if (SecureDTFindEntry("name", "peridot-fbcon", &entry) != kSuccess ||
  	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
  		return;
  	}
-diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+diff --git a/pexpert/pexpert/arm64/PERIDOT.h b/pexpert/pexpert/arm64/PERIDOT.h
 index b99c2f4..f64ccc5 100644
---- a/pexpert/pexpert/arm64/SWEET.h
-+++ b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/PERIDOT.h
++++ b/pexpert/pexpert/arm64/PERIDOT.h
 @@ -1,6 +1,6 @@
  /*
-- * Board config for the Redmi Note 10 Pro ("sweet", Qualcomm SM7150 /
+- * Board config for the Redmi Note 10 Pro ("peridot", Qualcomm SM7150 /
 - * Snapdragon 732G): Kryo 470 = Cortex-A76 + Cortex-A55, ARMv8.2, no PAC.
 + * Board config for the Poco F6 ("peridot", Qualcomm SM8635 / Snapdragon 8s
 + * Gen 3): Cortex-X4 + A720 + A520, built as the generic ARMv8.2 profile.
@@ -219,9 +219,9 @@ index b99c2f4..f64ccc5 100644
 + * XNU uses (CNTV) is INTID 16 + 11 = 27. The ADT "virtual-timer-intid"
 + * property overrides this default.
   */
--#define SWEET_VTIMER_INTID        19
-+#define SWEET_VTIMER_INTID        27
- #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+-#define PERIDOT_VTIMER_INTID        19
++#define PERIDOT_VTIMER_INTID        27
+ #define PERIDOT_IPI_SGI             1       // SGI used for cross-CPU signals
  
  #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
  
