@@ -1,0 +1,10 @@
+*.md
+__pycache__/
+*.pyc
+*.img
+*.fd
+*.bin
+*.zip
+*.efi
+*.yml
+*.yaml

@@ -1,0 +1,49 @@
+## @file
+#  XnuLoader: launches the XNU (Darwin) kernel for Xiaomi peridot.
+#
+#  The BootShim publishes a tail pointer at 0xA7400000 (FD_BASE + FD_SIZE)
+#  to a chain of "XNUKERN1"/"XNUFDT01" blocks appended after the UEFI FD.
+#  This application validates those blocks, copies the kernel to 0xC0000000
+#  (32MB-aligned, matching start.s block-mapping contract), applies the
+#  LC_DYLD_INFO rebase slide (0-based PIE kernel), builds arm64 boot_args
+#  from the GOP framebuffer, and hands off at EL1 with MMU off.
+#
+#  FILE_GUID must stay 7A3B1C2D-4E5F-4061-8234-9A0B1C2D3E4F — BootManagerLib
+#  searches the FV for PE32 sections with this GUID (see BootManager.c).
+#
+#  Copyright (c) 2026 DarwinXNU
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = XnuLoader
+  FILE_GUID                      = 7A3B1C2D-4E5F-4061-8234-9A0B1C2D3E4F
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+#
+#  VALID_ARCHITECTURES          = AARCH64
+#
+
+[Sources]
+  XnuLoader.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  PrintLib
+  DebugLib
+
+[Guids]
+
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid                ## SOMETIMES_CONSUMES

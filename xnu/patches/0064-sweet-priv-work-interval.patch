@@ -1,0 +1,57 @@
+--- a/bsd/kern/peridot_amfi.c
++++ b/bsd/kern/peridot_amfi.c
+@@ -29,6 +29,7 @@
+ #include <mach/kern_return.h>
+ #include <sys/codesign.h>
+ #include <sys/mount.h>
++#include <sys/priv.h>
+ #include <sys/proc.h>
+ #include <sys/systm.h>
+ #include <sys/ubc_internal.h>
+@@ -308,8 +309,46 @@
+ 	.mpo_vnode_check_signature = peridot_amfi_vnode_check_signature,
+ };
+ 
++/*
++ * Privileges for non-root processes come from MAC policies (priv_check_cred
++ * -> mac_priv_grant); on iOS Sandbox/AMFI grant them. Without a grant UIKit
++ * apps die in CoreAnimation setup: work_interval_create(CA_CLIENT) needs
++ * PRIV_WORK_INTERVAL ("Failed to create work interval", SpringBoard).
++ * Grant that one; log the first denial of each other privilege per process.
++ */
++#define PERIDOT_PRIV_LOG_MAX      64
++static struct {
++	int  priv;
++	char name[20];
++} peridot_priv_logged[PERIDOT_PRIV_LOG_MAX];
++static int peridot_priv_logged_count;
++
++static int
++peridot_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
++{
++	if (priv == PRIV_WORK_INTERVAL) {
++		return 0;
++	}
++	char name[20];
++	proc_selfname(name, sizeof(name));
++	for (int i = 0; i < peridot_priv_logged_count; i++) {
++		if (peridot_priv_logged[i].priv == priv &&
++		    strncmp(peridot_priv_logged[i].name, name, sizeof(name)) == 0) {
++			return EPERM;
++		}
++	}
++	if (peridot_priv_logged_count < PERIDOT_PRIV_LOG_MAX) {
++		peridot_priv_logged[peridot_priv_logged_count].priv = priv;
++		strlcpy(peridot_priv_logged[peridot_priv_logged_count].name, name, sizeof(name));
++		peridot_priv_logged_count++;
++		printf("PERIDOT Sandbox: %s privilege %d denied\n", name, priv);
++	}
++	return EPERM;
++}
++
+ static const struct mac_policy_ops peridot_sandbox_mac_ops = {
+ 	.mpo_policy_syscall = peridot_sandbox_syscall,
++	.mpo_priv_grant = peridot_sandbox_priv_grant,
+ };
+ 
+ static struct mac_policy_conf peridot_sandbox_mac_conf = {
