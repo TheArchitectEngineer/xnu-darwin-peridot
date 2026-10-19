@@ -1,0 +1,133 @@
+--- a/bsd/dev/peridot_spmi.c
++++ b/bsd/dev/peridot_spmi.c
+@@ -4,9 +4,11 @@
+  * APSS runs in execution environment 0. The eUSB2 repeater sits in the
+  * PM7550BA at SID 7, peripheral 0xfd. Reads use the observer channels,
+  * writes the "chnls" channels, and the PPID-to-APID map lives in the
+- * core block (v7: 0x2000 + 4*apid). Command format is the v2 one
+- * (opcode in bit 27, register in bits 11:4, byte count in bits 2:0);
+- * the SID is encoded in the APID, not in the command.
++ * core block (v7: 0x2000 + 4*apid). A PPID can be mapped by several
++ * APIDs, one per EE, and a channel owned by another EE aborts on write,
++ * so always pick the APID whose ownership table entry is EE0. Command
++ * format is the v2 one (opcode in bit 27, register in bits 11:4, byte
++ * count in bits 2:0); the SID is encoded in the APID, not the command.
+  */
+ #if defined(ARM64_BOARD_CONFIG_PERIDOT)
+ #include <sys/param.h>
+@@ -20,14 +22,15 @@
+ #define SP_CORE_PA      0x0c400000u
+ #define SP_OBS_PA       0x0c440000u
+ #define SP_WR_PA        0x0c500000u
++#define SP_CNFG_PA      0x0c42d000u
+ #define SP_MAP_OFF      0x2000u         /* v7 APID map */
+ #define SP_MAX_APIDS    1024u
+ #define SP_NO_APID      0xffffu
+ 
+-static vm_offset_t sp_core, sp_obs, sp_wr_base;
++static vm_offset_t sp_core, sp_obs, sp_wr_base, sp_cnfg;
+ static IOLock *sp_lock;
+ static unsigned sp_count;
+-static bool sp_attempted, sp_ready;
++static bool sp_attempted, sp_ready, sp_map_logged;
+ 
+ static uint32_t
+ sp_rd(vm_offset_t base, unsigned off)
+@@ -44,19 +47,50 @@
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
+-static uint16_t
+-sp_find_apid(unsigned sid, unsigned peripheral)
++/*
++ * Writes must go through the APID that the ownership table assigns to
++ * APSS (EE0); the hardware aborts accesses to channels owned by another
++ * EE. Reads work through any APID of this bus, but prefer EE0's too so
++ * both directions agree. Only the bus-0 APID range is scanned: on v7
++ * the APIDs for the secondary bus follow ours in the same map window.
++ */
++static int
++sp_find_apid(unsigned sid, unsigned peripheral, bool write, uint16_t *out)
+ {
+ 	unsigned ppid = ((sid & 0xfu) << 8) | (peripheral & 0xffu);
+-	unsigned i;
++	unsigned i, fallback = SP_NO_APID;
++	bool log = !sp_map_logged;
+ 
+ 	for (i = 0; i < sp_count; ++i) {
+ 		uint32_t map = sp_rd(sp_core, SP_MAP_OFF + 4u * i);
+-		if (map && ((map >> 8) & 0xfffu) == ppid) {
+-			return (uint16_t)i;
++		unsigned owner;
++
++		if (!map || ((map >> 8) & 0xfffu) != ppid) {
++			continue;
++		}
++		owner = sp_rd(sp_cnfg, 4u * i) & 0x7u;
++		if (log) {
++			printf("PERIDOT SPMI: ppid %#x apid %u owner %u%s\n",
++			    ppid, i, owner, (map & (1u << 24)) ? " irq" : "");
+ 		}
++		if (owner == 0) {
++			*out = (uint16_t)i;
++			sp_map_logged = true;
++			return 0;
++		}
++		if (fallback == SP_NO_APID) {
++			fallback = i;
++		}
++	}
++	sp_map_logged = true;
++	/* The observer path can still read through another EE's APID. */
++	if (!write && fallback != SP_NO_APID) {
++		*out = (uint16_t)fallback;
++		return 0;
+ 	}
+-	return SP_NO_APID;
++	printf("PERIDOT SPMI: no %s APID for sid=%u periph=%#x\n",
++	    write ? "writable" : "", sid, peripheral);
++	return -1;
+ }
+ 
+ static int
+@@ -113,7 +147,8 @@
+ 	sp_core = ml_io_map(SP_CORE_PA, 0x3000);
+ 	sp_obs = ml_io_map(SP_OBS_PA, 0x10000);
+ 	sp_wr_base = ml_io_map(SP_WR_PA, 0x400000);
+-	if (!sp_core || !sp_obs || !sp_wr_base) {
++	sp_cnfg = ml_io_map(SP_CNFG_PA, 0x4000);
++	if (!sp_core || !sp_obs || !sp_wr_base || !sp_cnfg) {
+ 		printf("PERIDOT SPMI: mapping failed\n");
+ 		return -1;
+ 	}
+@@ -122,10 +157,14 @@
+ 		printf("PERIDOT SPMI: unsupported arb %#x\n", arb_version);
+ 		return -1;
+ 	}
+-	/* v7 map window spans 1024 APIDs; unused entries read back zero. */
+-	sp_count = SP_MAX_APIDS;
++	/* v7: features register holds the number of APIDs of this bus. */
++	sp_count = sp_rd(sp_core, 4) & 0x7ffu;
++	if (!sp_count || sp_count > SP_MAX_APIDS) {
++		sp_count = SP_MAX_APIDS;
++	}
+ 	sp_ready = true;
+-	printf("PERIDOT SPMI: arb %#x\n", arb_version);
++	printf("PERIDOT SPMI: arb %#x, features %#x (%u APIDs)\n",
++	    arb_version, sp_rd(sp_core, 4), sp_count);
+ 	return 0;
+ }
+ 
+@@ -139,11 +178,8 @@
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+-	apid = sp_find_apid(sid, addr >> 8);
+-	if (apid == SP_NO_APID) {
++	if (sp_find_apid(sid, addr >> 8, write, &apid) != 0) {
+ 		IOLockUnlock(sp_lock);
+-		printf("PERIDOT SPMI: no APID for sid=%u periph=%#x\n", sid,
+-		    addr >> 8);
+ 		return -1;
+ 	}
+ 	result = write ? sp_write_locked(apid, addr, *value) :
