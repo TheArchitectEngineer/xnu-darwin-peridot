@@ -1167,7 +1167,7 @@ UefiMain (
          * mkadt default (the load base carries the link base's low bits). */
         PatchAdtNode ((UINT8 *)DtbPa, mDeviceTreeSize, 0,
                       mLoadBase, MemSize, RamdiskPa, mRamdiskSize);
-        if (mAdtPatched != 3) {
+        if ((mAdtPatched & 3) != 3) {
             Print (L"Xnuload: ADT dram-base/dram-size props missing (0x%x)\n",
                    mAdtPatched);
             return EFI_LOAD_ERROR;
