@@ -1,0 +1,138 @@
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -110,12 +110,18 @@
+ peridot_usb_power_on(vm_offset_t gcc)
+ {
+ 	vm_offset_t tcsr, phy;
++	int phyinit = 1;
+ 
++	PE_parse_boot_argn("peridotphy", &phyinit, sizeof(phyinit));
+ 	usb_wr(gcc, GCC_USB30_PRIM_BCR, 1);
+-	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 1);
++	if (phyinit) {
++		usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 1);
++	}
+ 	delay(1000);
+ 	usb_wr(gcc, GCC_USB30_PRIM_BCR, 0);
+-	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 0);
++	if (phyinit) {
++		usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 0);
++	}
+ 	delay(1000);
+ 
+ 	tcsr = ml_io_map(TCSRCC_PA, TCSRCC_SIZE);
+@@ -127,12 +133,21 @@
+ 		printf("PERIDOT USB: TCSR USB2 clkref 0x%08x\n",
+ 		    usb_rd(tcsr, TCSR_USB2_CLKREF_EN));
+ 	}
+-
+ 	phy = ml_io_map(EUSB2_PHY_PA, EUSB2_PHY_SIZE);
+ 	if (phy == 0) {
+ 		printf("PERIDOT USB: eUSB2 PHY map failed\n");
+ 		return;
+ 	}
++	if (!phyinit) {
++		printf("PERIDOT USB: PHY init skipped\n");
++		return;
++	}
++	/* Reference clock running: pulse the PHY reset like the downstream
++	 * driver does right before programming the PHY. */
++	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 1);
++	delay(1000);
++	usb_wr(gcc, GCC_QUSB2PHY_PRIM_BCR, 0);
++	delay(1000);
+ 	/* Register addresses and values from phy-msm-snps-eusb2.c. */
+ 	phy_rmw(phy, 0x94, 1u << 1, 1u << 1);           /* CFG0: CMN ctrl override */
+ 	phy_rmw(phy, 0x50, 1u << 1, 1u << 1);           /* UTMI_CTRL5: POR */
+@@ -221,6 +236,22 @@
+ 		return;
+ 	}
+ 	printf("PERIDOT USB: repeater revision 0x%02x\n", value);
++	{
++		uint8_t mode = 0, hiz = 0;
++
++		if (rptr_rd(0x40, &mode) == 0) {
++			printf("PERIDOT USB: repeater mode 0x%02x\n", mode);
++			/* Device mode: PERIPH_SEL, clear HOST_SEL. */
++			(void)rptr_wr(0x40, (mode & ~0x02u) | 0x01u);
++		}
++		if (rptr_rd(0x41, &hiz) == 0) {
++			printf("PERIDOT USB: repeater hiz 0x%02x\n", hiz);
++			if (hiz & 0x80) {
++				(void)rptr_wr(0x41, hiz & ~0x80u);
++				printf("PERIDOT USB: repeater hiz cleared\n");
++			}
++		}
++	}
+ 	/* Bring out of reset (RPTR_EN) before the tuning writes. */
+ 	if (rptr_rd(RPTR_EN_CTL1, &value) != 0) {
+ 		return;
+@@ -236,6 +267,15 @@
+ 			break;
+ 		}
+ 	}
++	{
++		uint8_t a = 0, b = 0, c = 0;
++
++		if (rptr_rd(0x50, &a) == 0 && rptr_rd(0x51, &b) == 0 &&
++		    rptr_rd(0x53, &c) == 0) {
++			printf("PERIDOT USB: repeater tune 0x50=0x%02x 0x51=0x%02x 0x53=0x%02x\n",
++			    a, b, c);
++		}
++	}
+ 	/* Device mode: clear the 19.2 MHz host-mode workaround. */
+ 	if (rptr_rd(0xe8, &value) == 0) {
+ 		(void)rptr_wr(0xe8, value & ~0x40);
+@@ -252,6 +292,15 @@
+ 	}
+ 	printf("PERIDOT USB: repeater status 0x%02x (%s)\n", value,
+ 	    (value & RPTR_RPTR_OK) ? "OK" : "NOT OK");
++	{
++		uint8_t infra = 0, drop = 0;
++
++		if (rptr_rd(0x09, &infra) == 0 &&
++		    rptr_rd(0x0a, &drop) == 0) {
++			printf("PERIDOT USB: repeater infra 0x%02x dropout 0x%02x\n",
++			    infra, drop);
++		}
++	}
+ }
+ 
+ void
+@@ -298,8 +347,8 @@
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+ 	if (enabled >= 2) {
+-		peridot_usb_power_on(gcc);
+ 		peridot_usb_repeater_on();
++		peridot_usb_power_on(gcc);
+ 		printf("PERIDOT USB: after power-on GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
+ 		    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc704));
+ 		peridot_usb_gadget_start(dwc);
+@@ -1075,6 +1124,14 @@
+ 	/* High speed, address 0 */
+ 	uint32_t dcfg = dwc_rd(DCFG) & ~(7u | (0x7fu << 3));
+ 	dwc_wr(DCFG, dcfg | 0);
++	printf("PERIDOT USB: DCFG set 0x%08x\n", dwc_rd(DCFG));
++	{
++		uint32_t gusb2 = dwc_rd(0xc200);
++
++		dwc_wr(0xc200, gusb2 & ~(1u << 6));     /* SUSPHY off */
++		printf("PERIDOT USB: GUSB2PHYCFG 0x%08x -> 0x%08x\n",
++		    gusb2, dwc_rd(0xc200));
++	}
+ 	/* Events: disconnect, USB reset, connect done */
+ 	dwc_wr(DEVTEN, 0x7);
+ 
+@@ -1105,7 +1162,10 @@
+ 	for (i = 0; i < 500 && (dwc_rd(DSTS) & DSTS_DEVCTRLHLT); i++) {
+ 		delay(1000);
+ 	}
+-	printf("PERIDOT USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
++	delay(50000);
++	printf("PERIDOT USB: running (DSTS 0x%08x after %d ms), DCFG 0x%08x GCTL 0x%08x GEVNTCOUNT %u, DMA at 0x%llx\n",
++	    dwc_rd(DSTS), i, dwc_rd(DCFG), dwc_rd(GCTL),
++	    dwc_rd(GEVNTCOUNT) & 0xffff, ud.dma_pa);
+ 	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
