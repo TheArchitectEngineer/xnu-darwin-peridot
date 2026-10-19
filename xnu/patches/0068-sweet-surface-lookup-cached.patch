@@ -1,12 +1,12 @@
---- a/iokit/Kernel/arm/PeridotSurface.cpp
-+++ b/iokit/Kernel/arm/PeridotSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -407,7 +407,7 @@
  	OSArray *fRefs;
  
- 	PeridotSurfaceRef *findRef(uint32_t id, unsigned int *index);
--	IOReturn addRef(PeridotSurface *s, PeridotSurfaceRef **refOut);
-+	IOReturn addRef(PeridotSurface *s, PeridotSurfaceRef **refOut, bool *existing);
- 	IOReturn returnSurface(PeridotSurface *s, IOExternalMethodArguments *args);
+ 	SweetSurfaceRef *findRef(uint32_t id, unsigned int *index);
+-	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut);
++	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing);
+ 	IOReturn returnSurface(SweetSurface *s, IOExternalMethodArguments *args);
  	IOReturn create(IOExternalMethodArguments *args);
  
 @@ -495,17 +495,25 @@
@@ -22,25 +22,25 @@
 + * snapshot crash in CGDataProviderCreateWithData).
   */
  IOReturn
--IOSurfaceRootUserClient::addRef(PeridotSurface *s, PeridotSurfaceRef **refOut)
-+IOSurfaceRootUserClient::addRef(PeridotSurface *s, PeridotSurfaceRef **refOut, bool *existing)
+-IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut)
++IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing)
  {
 +	*existing = false;
  	IOLockLock(fLock);
- 	PeridotSurfaceRef *ref = findRef(s->id, NULL);
+ 	SweetSurfaceRef *ref = findRef(s->id, NULL);
  	if (ref != NULL && ref->surface == s) {
 -		ref->count++;
  		IOLockUnlock(fLock);
- 		peridot_surface_put(s);
+ 		sweet_surface_put(s);
  		*refOut = ref;
 +		*existing = true;
  		return kIOReturnSuccess;
  	}
  	IOLockUnlock(fLock);
 @@ -615,7 +623,8 @@
- IOSurfaceRootUserClient::returnSurface(PeridotSurface *s, IOExternalMethodArguments *args)
+ IOSurfaceRootUserClient::returnSurface(SweetSurface *s, IOExternalMethodArguments *args)
  {
- 	PeridotSurfaceRef *ref = NULL;
+ 	SweetSurfaceRef *ref = NULL;
 -	IOReturn ret = addRef(s, &ref);
 +	bool existing = false;
 +	IOReturn ret = addRef(s, &ref, &existing);
@@ -50,12 +50,12 @@
 @@ -624,10 +633,13 @@
  		ret = kIOReturnNoMemory;
  	} else {
- 		peridot_surface_fill_result(s, ref, out);
+ 		sweet_surface_fill_result(s, ref, out);
 +		if (existing) {
 +			put64(out, 0x00, ~0ULL);        /* "already yours": use the cached client */
 +		}
- 		ret = peridot_struct_out(args, out, PERIDOT_SURFACE_RESULT_SIZE);
- 		IOFreeData(out, PERIDOT_SURFACE_RESULT_SIZE);
+ 		ret = sweet_struct_out(args, out, SWEET_SURFACE_RESULT_SIZE);
+ 		IOFreeData(out, SWEET_SURFACE_RESULT_SIZE);
  	}
 -	if (ret != kIOReturnSuccess) {
 +	if (ret != kIOReturnSuccess && !existing) {

@@ -1,6 +1,6 @@
-diff --git a/config/MASTER.arm64.peridot b/config/MASTER.arm64.peridot
---- a/config/MASTER.arm64.peridot
-+++ b/config/MASTER.arm64.peridot
+diff --git a/config/MASTER.arm64.sweet b/config/MASTER.arm64.sweet
+--- a/config/MASTER.arm64.sweet
++++ b/config/MASTER.arm64.sweet
 @@ -31,7 +31,7 @@
  #  BSD_RELEASE =    [ BSD_BASE ]
  #  BSD_DEV =        [ BSD_BASE config_vnguard ]
@@ -38,9 +38,9 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
  	bool unhide;
  
  	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
-+#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
 +	/*
-+	 * PERIDOT has no IOStorageFamily, so no service can be a block storage
++	 * SWEET has no IOStorageFamily, so no service can be a block storage
 +	 * driver: the root (e.g. a RAM disk) is not block media, as for image boot.
 +	 */
 +	if (!ioblockstoragedriverClass) {

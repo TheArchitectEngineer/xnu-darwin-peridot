@@ -2,16 +2,16 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 index 997a4ab..db26bbe 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -697,6 +697,173 @@ register_serial_functions(struct pe_serial_functions *fns)
+@@ -697,6 +697,148 @@ register_serial_functions(struct pe_serial_functions *fns)
  	gPESF = fns;
  }
  
 +/*****************************************************************************/
 +
 +/*
-+ * peridot: framebuffer "serial" for boards with no usable UART (the Poco F6
-+ * debug UART engine runs in SPI mode). kprintf output is drawn onto
-+ * the boot framebuffer described by the ADT node "peridot-fbcon":
++ * sweet: framebuffer "serial" for boards with no usable UART (the Redmi Note
++ * 10 Pro's debug UART engine runs in SPI mode). kprintf output is drawn onto
++ * the boot framebuffer described by the ADT node "sweet-fbcon":
 + *   reg    = <phys size>       absolute physical address, not arm-io relative
 + *   width, height              pixels
 + *   stride                     bytes per line, 32bpp
@@ -108,21 +108,15 @@ index 997a4ab..db26bbe 100644
 +	return 0;
 +}
 +
-+SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) peridot_fbcon_serial_functions =
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) sweet_fbcon_serial_functions =
 +{
 +	.init = fbcon_init,
 +	.transmit_ready = fbcon_transmit_ready,
 +	.transmit_data = fbcon_transmit_data,
 +	.receive_ready = fbcon_receive_ready,
 +	.receive_data = fbcon_receive_data,
-+	.device = SERIAL_PERIDOT_FBCON
++	.device = SERIAL_SWEET_FBCON
 +};
-+
-+#if defined(ARM64_BOARD_CONFIG_PERIDOT)
-+/* Filled by peridot_early_set_video() from boot_args before serial_init. */
-+extern int peridot_early_video(uint64_t *pa, uint32_t *w, uint32_t *h,
-+    uint32_t *stride);
-+#endif
 +
 +static void
 +fbcon_probe(void)
@@ -132,26 +126,7 @@ index 997a4ab..db26bbe 100644
 +	uint32_t const *val;
 +	unsigned int size;
 +
-+#if defined(ARM64_BOARD_CONFIG_PERIDOT)
-+	/* The boot loader's boot_args Video block wins over the ADT node:
-+	 * the loaders fill it with the live GOP/ABL framebuffer. */
-+	uint64_t boot_pa = 0;
-+	uint32_t boot_w = 0, boot_h = 0, boot_stride = 0;
-+	if (peridot_early_video(&boot_pa, &boot_w, &boot_h, &boot_stride) == 0 &&
-+	    boot_w && boot_h && boot_stride >= boot_w * 4) {
-+		fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(boot_pa,
-+		    (vm_size_t)boot_stride * boot_h);
-+		if (fbcon_base != NULL) {
-+			fbcon_width = boot_w;
-+			fbcon_height = boot_h;
-+			fbcon_stride = boot_stride;
-+			register_serial_functions(&peridot_fbcon_serial_functions);
-+			return;
-+		}
-+	}
-+#endif
-+
-+	if (SecureDTFindEntry("name", "peridot-fbcon", &entry) != kSuccess ||
++	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
 +	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
 +		return;
 +	}
@@ -169,7 +144,7 @@ index 997a4ab..db26bbe 100644
 +	}
 +	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
 +	if (fbcon_base != NULL) {
-+		register_serial_functions(&peridot_fbcon_serial_functions);
++		register_serial_functions(&sweet_fbcon_serial_functions);
 +	}
 +}
 +
@@ -195,7 +170,7 @@ index 404b50b..de0d744 100644
  	SERIAL_VMAPPLE_UART=0x8,
 -	SERIAL_DCC_UART=0x10
 +	SERIAL_DCC_UART=0x10,
-+	SERIAL_PERIDOT_FBCON=0x20
++	SERIAL_SWEET_FBCON=0x20
  } serial_device_t;
  
  kern_return_t serial_irq_enable(serial_device_t device);

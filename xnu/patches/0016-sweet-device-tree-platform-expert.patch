@@ -5,11 +5,11 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
  
  const char * gIOKernelConfigTables =
      "("
-+#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
 +    "   {"
-+    "     'IOClass'         = PeridotPlatformExpert;"
++    "     'IOClass'         = SweetPlatformExpert;"
 +    "     'IOProviderClass' = IOPlatformExpertDevice;"
-+    "     'IONameMatch'     = 'xiaomi,peridot';"
++    "     'IONameMatch'     = 'xiaomi,sweet';"
 +    "     'IOProbeScore'    = 10000:32;"
 +    "   },"
 +#endif
@@ -24,27 +24,27 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
  # SMP
  iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
 +
-+# PERIDOT device-tree platform (empty translation unit on other boards)
-+iokit/Kernel/arm/PeridotPlatformExpert.cpp                         optional iokitcpp
-diff --git a/iokit/Kernel/arm/PeridotPlatformExpert.cpp b/iokit/Kernel/arm/PeridotPlatformExpert.cpp
++# SWEET device-tree platform (empty translation unit on other boards)
++iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
 new file mode 100644
 --- /dev/null
-+++ b/iokit/Kernel/arm/PeridotPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
 @@ -0,0 +1,86 @@
 +/*
-+ * Minimal device-tree platform expert for Redmi Note 10 Pro (peridot).
++ * Minimal device-tree platform expert for Redmi Note 10 Pro (sweet).
 + * Uses XNU's normal platform, power-domain and nub initialization. Hardware
 + * interrupt and power-management services are supplied by separate drivers.
 + */
 +#include <pexpert/arm64/board_config.h>
 +
-+#if defined(PERIDOT)
++#if defined(SWEET)
 +#include <IOKit/IOPlatformExpert.h>
 +#include <IOKit/IODeviceTreeSupport.h>
 +#include <IOKit/IOLib.h>
 +
-+class PeridotPlatformExpert : public IODTPlatformExpert {
-+	OSDeclareDefaultStructors(PeridotPlatformExpert);
++class SweetPlatformExpert : public IODTPlatformExpert {
++	OSDeclareDefaultStructors(SweetPlatformExpert);
 +
 +public:
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -55,38 +55,38 @@ new file mode 100644
 +	bool getProductName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(PeridotPlatformExpert, IODTPlatformExpert);
++OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
 +
 +bool
-+PeridotPlatformExpert::start(IOService *provider)
++SweetPlatformExpert::start(IOService *provider)
 +{
-+	IOLog("PERIDOT: starting device-tree platform expert\n");
++	IOLog("SWEET: starting device-tree platform expert\n");
 +	if (!IODTPlatformExpert::start(provider)) {
 +		return false;
 +	}
 +	registerService();
-+	IOLog("PERIDOT: platform expert registered\n");
++	IOLog("SWEET: platform expert registered\n");
 +	return true;
 +}
 +
 +const char *
-+PeridotPlatformExpert::deleteList(void)
++SweetPlatformExpert::deleteList(void)
 +{
 +	return "()";
 +}
 +
 +const char *
-+PeridotPlatformExpert::excludeList(void)
++SweetPlatformExpert::excludeList(void)
 +{
 +	return "('chosen', 'defaults', 'cpus', 'options')";
 +}
 +
 +void
-+PeridotPlatformExpert::processTopLevel(IORegistryEntry *root)
++SweetPlatformExpert::processTopLevel(IORegistryEntry *root)
 +{
 +	/*
 +	 * The stock implementation requires an Apple NVRAM /options node.
-+	 * PERIDOT has no NVRAM controller; publish real CPU/device nodes without
++	 * SWEET has no NVRAM controller; publish real CPU/device nodes without
 +	 * inventing one. createNubs adds the topology's logical CPU/cluster IDs.
 +	 */
 +	IORegistryEntry *cpus = root->childFromPath("cpus", gIODTPlane);
@@ -98,17 +98,17 @@ new file mode 100644
 +}
 +
 +bool
-+PeridotPlatformExpert::getTargetName(char *name, int maxLength)
++SweetPlatformExpert::getTargetName(char *name, int maxLength)
 +{
 +	if (name == NULL || maxLength <= 0) {
 +		return false;
 +	}
-+	strlcpy(name, "peridot", (size_t)maxLength);
++	strlcpy(name, "sweet", (size_t)maxLength);
 +	return true;
 +}
 +
 +bool
-+PeridotPlatformExpert::getProductName(char *name, int maxLength)
++SweetPlatformExpert::getProductName(char *name, int maxLength)
 +{
 +	if (name == NULL || maxLength <= 0) {
 +		return false;
@@ -116,4 +116,4 @@ new file mode 100644
 +	strlcpy(name, "Redmi Note 10 Pro", (size_t)maxLength);
 +	return true;
 +}
-+#endif /* PERIDOT */
++#endif /* SWEET */

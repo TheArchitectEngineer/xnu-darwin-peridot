@@ -1,16 +1,16 @@
-diff --git a/iokit/Kernel/arm/PeridotCPU.cpp b/iokit/Kernel/arm/PeridotCPU.cpp
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 new file mode 100644
 --- /dev/null
-+++ b/iokit/Kernel/arm/PeridotCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
 @@ -0,0 +1,171 @@
 +/*
-+ * Single-CPU bring-up for peridot using XNU's legacy IOCPU interface.
++ * Single-CPU bring-up for sweet using XNU's legacy IOCPU interface.
 + * The architected timer and SGI1 already enter through pe_fiq/sleh_irq.
 + * Secondary CPU startup and system suspend require separate platform work.
 + */
 +#include <pexpert/arm64/board_config.h>
 +
-+#if defined(PERIDOT)
++#if defined(SWEET)
 +#include <IOKit/IOCPU.h>
 +#include <IOKit/IOLib.h>
 +#include <libkern/c++/OSData.h>
@@ -21,8 +21,8 @@ new file mode 100644
 +#include <kern/processor.h>
 +#include <mach/mach_time.h>
 +
-+class PeridotCPU : public IOCPU {
-+	OSDeclareDefaultStructors(PeridotCPU);
++class SweetCPU : public IOCPU {
++	OSDeclareDefaultStructors(SweetCPU);
 +	const OSSymbol *cpuName = NULL;
 +
 +public:
@@ -36,10 +36,10 @@ new file mode 100644
 +	const OSSymbol *getCPUName(void) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(PeridotCPU, IOCPU);
++OSDefineMetaClassAndStructors(SweetCPU, IOCPU);
 +
 +bool
-+PeridotCPU::start(IOService *provider)
++SweetCPU::start(IOService *provider)
 +{
 +	const ml_topology_info_t *topology = ml_get_topology_info();
 +	const ml_topology_cpu_t *cpu = topology->boot_cpu;
@@ -52,12 +52,12 @@ new file mode 100644
 +		return false;
 +	}
 +	if (topology->num_cpus != 1) {
-+		panic("PERIDOT CPU: only single-CPU bring-up is supported");
++		panic("SWEET CPU: only single-CPU bring-up is supported");
 +	}
 +	if (!IOCPU::start(provider)) {
 +		return false;
 +	}
-+	cpuName = OSSymbol::withCStringNoCopy("peridot cores");
++	cpuName = OSSymbol::withCStringNoCopy("Kryo 470");
 +	if (cpuName == NULL) {
 +		return false;
 +	}
@@ -76,16 +76,16 @@ new file mode 100644
 +	perfmon_interrupt_handler_func pmi_handler = NULL;
 +	kern_return_t result = ml_processor_register(&info, &machProcessor, &ipi_handler, &pmi_handler);
 +	if (result != KERN_SUCCESS) {
-+		panic("PERIDOT CPU: ml_processor_register failed: %d", result);
++		panic("SWEET CPU: ml_processor_register failed: %d", result);
 +	}
 +	if (pmi_handler != NULL) {
-+		panic("PERIDOT CPU: PMI routing is not implemented");
++		panic("SWEET CPU: PMI routing is not implemented");
 +	}
 +
 +	/* Re-enter the boot CPU through cpu_machine_init -> PE_cpu_machine_init. */
 +	result = processor_start(machProcessor);
 +	if (result != KERN_SUCCESS || getCPUState() != kIOCPUStateRunning) {
-+		panic("PERIDOT CPU: processor_start failed: %d", result);
++		panic("SWEET CPU: processor_start failed: %d", result);
 +	}
 +	ml_cpu_init_completed();
 +	cpusRunning();
@@ -94,23 +94,23 @@ new file mode 100644
 +
 +	/* Announce completion only after registration, startup and SGI validation. */
 +	ml_set_max_cpus(topology->max_cpu_id + 1);
-+	IOLog("PERIDOT CPU: boot CPU %u registered, SGI1 verified, initialization complete\n",
++	IOLog("SWEET CPU: boot CPU %u registered, SGI1 verified, initialization complete\n",
 +	    getCPUNumber());
 +	return true;
 +}
 +
 +void
-+PeridotCPU::free(void)
++SweetCPU::free(void)
 +{
 +	OSSafeReleaseNULL(cpuName);
 +	IOCPU::free();
 +}
 +
 +void
-+PeridotCPU::initCPU(bool boot)
++SweetCPU::initCPU(bool boot)
 +{
 +	if (!boot) {
-+		panic("PERIDOT CPU: resume is not implemented");
++		panic("SWEET CPU: resume is not implemented");
 +	}
 +	assert(cpu_number() == (int)getCPUNumber());
 +	assert(ml_get_interrupts_enabled());
@@ -122,7 +122,7 @@ new file mode 100644
 +	signalCPU(this);
 +	while (!ml_cpu_signal_is_enabled()) {
 +		if (mach_absolute_time() > deadline) {
-+			panic("PERIDOT CPU: SGI1 self-test timed out");
++			panic("SWEET CPU: SGI1 self-test timed out");
 +		}
 +		__asm__ volatile("yield");
 +	}
@@ -130,59 +130,59 @@ new file mode 100644
 +}
 +
 +void
-+PeridotCPU::signalCPU(IOCPU *target)
++SweetCPU::signalCPU(IOCPU *target)
 +{
 +	/* Only the boot CPU is registered by this driver. */
 +	if (target != this || cpu_number() != (int)getCPUNumber()) {
-+		panic("PERIDOT CPU: secondary CPU signalling is not implemented");
++		panic("SWEET CPU: secondary CPU signalling is not implemented");
 +	}
 +	uint64_t mpidr = __builtin_arm_rsr64("MPIDR_EL1");
 +	unsigned int aff0 = mpidr & 0xff;
 +	if (aff0 >= 16) {
-+		panic("PERIDOT CPU: SGI target requires unsupported range selector");
++		panic("SWEET CPU: SGI target requires unsupported range selector");
 +	}
 +	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
 +	    (((mpidr >> 16) & 0xff) << 32) |
 +	    (((mpidr >> 8) & 0xff) << 16) |
-+	    ((uint64_t)PERIDOT_IPI_SGI << 24) | (1ULL << aff0);
++	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
 +	__builtin_arm_dsb(DSB_ISHST);
 +	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
 +	__builtin_arm_isb(ISB_SY);
 +}
 +
 +kern_return_t
-+PeridotCPU::startCPU(vm_offset_t start_paddr __unused, vm_offset_t arg_paddr __unused)
++SweetCPU::startCPU(vm_offset_t start_paddr __unused, vm_offset_t arg_paddr __unused)
 +{
 +	return KERN_NOT_SUPPORTED;
 +}
 +
 +void
-+PeridotCPU::quiesceCPU(void)
++SweetCPU::quiesceCPU(void)
 +{
-+	panic("PERIDOT CPU: CPU quiesce is not implemented");
++	panic("SWEET CPU: CPU quiesce is not implemented");
 +}
 +
 +void
-+PeridotCPU::haltCPU(void)
++SweetCPU::haltCPU(void)
 +{
-+	panic("PERIDOT CPU: CPU halt/suspend is not implemented");
++	panic("SWEET CPU: CPU halt/suspend is not implemented");
 +}
 +
 +const OSSymbol *
-+PeridotCPU::getCPUName(void)
++SweetCPU::getCPUName(void)
 +{
 +	return cpuName;
 +}
-+#endif /* PERIDOT */
++#endif /* SWEET */
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
 @@ -41,6 +41,12 @@
-     "     'IONameMatch'     = 'xiaomi,peridot';"
+     "     'IONameMatch'     = 'xiaomi,sweet';"
      "     'IOProbeScore'    = 10000:32;"
      "   },"
 +    "   {"
-+    "     'IOClass'         = PeridotCPU;"
++    "     'IOClass'         = SweetCPU;"
 +    "     'IOProviderClass' = IOPlatformDevice;"
 +    "     'IONameMatch'     = 'qcom,kryo470';"
 +    "     'IOProbeScore'    = 10000:32;"
@@ -195,7 +195,7 @@ diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
 @@ -8,3 +8,5 @@
  
- # PERIDOT device-tree platform (empty translation unit on other boards)
- iokit/Kernel/arm/PeridotPlatformExpert.cpp                         optional iokitcpp
+ # SWEET device-tree platform (empty translation unit on other boards)
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
 +
-+iokit/Kernel/arm/PeridotCPU.cpp                                    optional iokitcpp
++iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp

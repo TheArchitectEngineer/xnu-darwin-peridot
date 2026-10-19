@@ -1,5 +1,5 @@
---- a/bsd/dev/peridot_ufs.c
-+++ b/bsd/dev/peridot_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
 @@ -30,6 +30,7 @@
  #include <miscfs/devfs/devfs.h>
  #include <kern/locks.h>
@@ -93,7 +93,7 @@
 +		uint64_t now = mach_absolute_time();
 +		if (now > deadline) {
  			ufs_wr(REG_UTRLCLR, ~1u);
- 			printf("PERIDOT UFS: command 0x%02x timed out\n", cdb[0]);
+ 			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
  			return ETIMEDOUT;
  		}
 -		delay(1);
@@ -143,39 +143,39 @@
 - * start). Device block 0 of that area is a header:
 + * the partition every ufslogsecs seconds (default 10), far behind the HFS
 + * image at its start. Device block 0 of that area is a header:
-  *   "PERIDOTLOG" | u32 version 1 | u32 ring size | u64 total bytes written
+  *   "SWEETLOG" | u32 version 1 | u32 ring size | u64 total bytes written
   *   | u64 flush sequence
   * ring offset of byte n = n % ring size. Read it from a recovery with
 @@ -622,10 +676,12 @@
   */
- #define PERIDOT_LOG_SIZE          (4u << 20)
- #define PERIDOT_LOG_BLOCKS        (1 + PERIDOT_LOG_SIZE / UFS_BLOCK)
-+#define PERIDOT_LOG_SECS          10u
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
++#define SWEET_LOG_SECS          10u
  
- static char peridot_log_ring[PERIDOT_LOG_SIZE];
- static uint64_t _Atomic peridot_log_total;
- static int peridot_log_chan;
-+static uint32_t peridot_log_secs = PERIDOT_LOG_SECS;
+ static char sweet_log_ring[SWEET_LOG_SIZE];
+ static uint64_t _Atomic sweet_log_total;
+ static int sweet_log_chan;
++static uint32_t sweet_log_secs = SWEET_LOG_SECS;
  
  /* Called for all console output, any context: never blocks. */
- void peridot_log_append(const char *c, int size);
+ void sweet_log_append(const char *c, int size);
 @@ -658,7 +714,7 @@
- 	printf("PERIDOT LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
- 	    PERIDOT_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+ 	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+ 	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
  	for (;;) {
--		(void)tsleep(&peridot_log_chan, PZERO, "peridotlog", hz);
-+		(void)tsleep(&peridot_log_chan, PZERO, "peridotlog", hz * (int)peridot_log_secs);
- 		uint64_t total = os_atomic_load(&peridot_log_total, relaxed);
+-		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz);
++		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
+ 		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
  		if (total == flushed) {
  			continue;
 @@ -708,6 +764,10 @@
- 	if (!on || !su.writable || su.nblocks < 2 * PERIDOT_LOG_BLOCKS) {
+ 	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
  		return;
  	}
-+	PE_parse_boot_argn("ufslogsecs", &peridot_log_secs, sizeof(peridot_log_secs));
-+	if (peridot_log_secs == 0 || peridot_log_secs > 60) {
-+		peridot_log_secs = PERIDOT_LOG_SECS;
++	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
++	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
++		sweet_log_secs = SWEET_LOG_SECS;
 +	}
- 	if (kernel_thread_start(peridot_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
  		thread_deallocate(thread);
  	}
