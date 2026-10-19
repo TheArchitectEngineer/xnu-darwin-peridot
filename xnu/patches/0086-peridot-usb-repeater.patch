@@ -1,0 +1,358 @@
+--- a/bsd/dev/peridot_spmi.h
++++ b/bsd/dev/peridot_spmi.h
+@@ -1,6 +1,6 @@
+-/* Shared C/C++ interface. Init once, on the PeridotBattery start thread. */
+-#ifndef PERIDOT_BATTERY_SPMI_H
+-#define PERIDOT_BATTERY_SPMI_H
++/* Shared C/C++ interface. Init once, on the USB bring-up thread. */
++#ifndef PERIDOT_USB_SPMI_H
++#define PERIDOT_USB_SPMI_H
+ #include <stdint.h>
+ #ifdef __cplusplus
+ extern "C" {
+@@ -8,6 +8,7 @@
+ int peridot_spmi_init(void);
+ /* Thread context only; 0 success, -1 failure; *out unchanged on failure. */
+ int peridot_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++int peridot_spmi_write(unsigned sid, unsigned addr, uint8_t val);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/peridot_spmi.c
++++ b/bsd/dev/peridot_spmi.c
+@@ -1,9 +1,12 @@
+ /*
+- * Battery-only adaptation of input/peridot_keys.c, observer EXT_READL.
+- * PMIC READ ONLY. The only MMIO store issues a one-byte read command.
+- * No interrupt clear, peripheral enable, charger config, or PMIC writes.
+- * Init is serialized by the single built-in PeridotBattery personality.
+- * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
++ * SPMI access to the PMIC arbiter v7 on peridot (spmi@c42d000).
++ *
++ * APSS runs in execution environment 0. The eUSB2 repeater sits in the
++ * PM7550BA at SID 7, peripheral 0xfd. Reads use the observer channels,
++ * writes the "chnls" channels, and the PPID-to-APID map lives in the
++ * core block (v7: 0x2000 + 4*apid). Command format is the v2 one
++ * (opcode in bit 27, register in bits 11:4, byte count in bits 2:0);
++ * the SID is encoded in the APID, not in the command.
+  */
+ #if defined(ARM64_BOARD_CONFIG_PERIDOT)
+ #include <sys/param.h>
+@@ -14,17 +17,17 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+-#define SP_CORE_PA 0x0c440000u
+-#define SP_OBS_PA  0x0e600000u
+-#define SP_CFG_PA  0x0c40a000u
+-#define SP_NO_APID 0xffffu
++#define SP_CORE_PA      0x0c400000u
++#define SP_OBS_PA       0x0c440000u
++#define SP_WR_PA        0x0c500000u
++#define SP_MAP_OFF      0x2000u         /* v7 APID map */
++#define SP_MAX_APIDS    1024u
++#define SP_NO_APID      0xffffu
+ 
+-static vm_offset_t sp_core, sp_obs, sp_cfg;
++static vm_offset_t sp_core, sp_obs, sp_wr_base;
+ static IOLock *sp_lock;
+ static unsigned sp_count;
+ static bool sp_attempted, sp_ready;
+-/* A timed-out command may complete late: never reuse that lane this boot. */
+-static bool sp_poisoned[512];
+ 
+ static uint32_t
+ sp_rd(vm_offset_t base, unsigned off)
+@@ -34,26 +37,71 @@
+ 	return value;
+ }
+ 
++static void
++sp_wr(vm_offset_t base, unsigned off, uint32_t value)
++{
++	*(volatile uint32_t *)(base + off) = value;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ static uint16_t
+-sp_find_apid(unsigned ppid)
++sp_find_apid(unsigned sid, unsigned peripheral)
+ {
+-	uint16_t found = SP_NO_APID;
+-	for (unsigned i = 0; i < sp_count; ++i) {
+-		uint32_t map = sp_rd(sp_core, 0x900u + 4u * i);
+-		if (!map || ((map >> 8) & 0xfffu) != ppid) {
+-			continue;
++	unsigned ppid = ((sid & 0xfu) << 8) | (peripheral & 0xffu);
++	unsigned i;
++
++	for (i = 0; i < sp_count; ++i) {
++		uint32_t map = sp_rd(sp_core, SP_MAP_OFF + 4u * i);
++		if (map && ((map >> 8) & 0xfffu) == ppid) {
++			return (uint16_t)i;
+ 		}
+-		unsigned owner = sp_rd(sp_cfg, 0x700u + 4u * i) & 7u;
+-		if (found == SP_NO_APID || owner == 0) {
+-			found = (uint16_t)i;
++	}
++	return SP_NO_APID;
++}
++
++static int
++sp_wait_done(vm_offset_t base, unsigned off)
++{
++	unsigned i;
++
++	for (i = 0; i < 1000; ++i) {
++		uint32_t status = sp_rd(base, off + 0x08u);
++		if (status & 1u) {
++			return (status & 0x0eu) ? -1 : 0;
+ 		}
++		delay(1);
+ 	}
+-	return found;
++	return -1;
++}
++
++static int
++sp_read_locked(uint16_t apid, unsigned addr, uint8_t *out)
++{
++	unsigned off = 0x20u * apid;
++
++	sp_wr(sp_obs, off, (1u << 27) | ((addr & 0xffu) << 4));
++	if (sp_wait_done(sp_obs, off) != 0) {
++		return -1;
++	}
++	*out = (uint8_t)sp_rd(sp_obs, off + 0x18u);
++	return 0;
++}
++
++static int
++sp_write_locked(uint16_t apid, unsigned addr, uint8_t value)
++{
++	unsigned off = 0x1000u * apid;
++
++	sp_wr(sp_wr_base, off + 0x10u, value);               /* WDATA0 */
++	sp_wr(sp_wr_base, off, (addr & 0xffu) << 4);    /* EXT_WRITEL, 1 byte */
++	return sp_wait_done(sp_wr_base, off);
+ }
+ 
+ int
+ peridot_spmi_init(void)
+ {
++	uint32_t arb_version;
++
+ 	if (sp_attempted) {
+ 		return sp_ready ? 0 : -1;
+ 	}
+@@ -62,65 +110,57 @@
+ 	if (!sp_lock) {
+ 		return -1;
+ 	}
+-	sp_core = ml_io_map(SP_CORE_PA, 0x2000);
+-	sp_cfg = ml_io_map(SP_CFG_PA, 0x1000);
+-	sp_obs = ml_io_map(SP_OBS_PA, 0x10000); /* EE 0, 512 * 0x80 */
+-	if (!sp_core || !sp_cfg || !sp_obs) {
+-		printf("PERIDOT BATTERY: SPMI mapping failed\n");
++	sp_core = ml_io_map(SP_CORE_PA, 0x3000);
++	sp_obs = ml_io_map(SP_OBS_PA, 0x10000);
++	sp_wr_base = ml_io_map(SP_WR_PA, 0x400000);
++	if (!sp_core || !sp_obs || !sp_wr_base) {
++		printf("PERIDOT SPMI: mapping failed\n");
+ 		return -1;
+ 	}
+-	uint32_t arb_version = sp_rd(sp_core, 0);
+-	sp_count = sp_rd(sp_core, 4) & 0x7ffu;
+-	if (arb_version < 0x50000000u || arb_version >= 0x70000000u ||
+-	    !sp_count || sp_count > 512) {
+-		printf("PERIDOT BATTERY: unsupported SPMI arb=%#x APIDs=%u\n",
+-		    arb_version, sp_count);
++	arb_version = sp_rd(sp_core, 0);
++	if (arb_version < 0x70000000u) {
++		printf("PERIDOT SPMI: unsupported arb %#x\n", arb_version);
+ 		return -1;
+ 	}
++	/* v7 map window spans 1024 APIDs; unused entries read back zero. */
++	sp_count = SP_MAX_APIDS;
+ 	sp_ready = true;
+-	printf("PERIDOT BATTERY: SPMI arb=%#x APIDs=%u, observer reads only\n",
+-	    arb_version, sp_count);
++	printf("PERIDOT SPMI: arb %#x\n", arb_version);
+ 	return 0;
+ }
+ 
+-int
+-peridot_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
++static int
++sp_access(unsigned sid, unsigned addr, uint8_t *value, bool write)
+ {
+-	/* Restrict access to the battery blocks; keys retain their own lanes. */
+-	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
+-	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48)) {
++	uint16_t apid;
++	int result;
++
++	if (!sp_ready || !value || sid > 0xfu || addr > 0xffffu) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+-	uint16_t apid = sp_find_apid((sid << 8) | peripheral);
+-	if (apid == SP_NO_APID || sp_poisoned[apid]) {
++	apid = sp_find_apid(sid, addr >> 8);
++	if (apid == SP_NO_APID) {
+ 		IOLockUnlock(sp_lock);
++		printf("PERIDOT SPMI: no APID for sid=%u periph=%#x\n", sid,
++		    addr >> 8);
+ 		return -1;
+ 	}
+-	unsigned off = 0x80u * apid;
+-	uint32_t cmd = (1u << 27) | ((addr & 0xffu) << 4);
+-	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(sp_obs + off) = cmd; /* EXT_READL, BC=0 */
+-	__asm__ volatile("dsb osh" ::: "memory");
+-	for (unsigned i = 0; i < 1000; ++i) {
+-		uint32_t status = sp_rd(sp_obs, off + 0x08u);
+-		if (status & 1u) {
+-			if (status & 0x0eu) {
+-				IOLockUnlock(sp_lock);
+-				return -1;
+-			}
+-			*out = (uint8_t)sp_rd(sp_obs, off + 0x18u);
+-			IOLockUnlock(sp_lock);
+-			return 0;
+-		}
+-		delay(1);
+-	}
+-	sp_poisoned[apid] = true;
+-	printf("PERIDOT BATTERY: SPMI timeout sid=%u addr=%#x APID=%u disabled\n",
+-	    sid, addr, apid);
++	result = write ? sp_write_locked(apid, addr, *value) :
++	    sp_read_locked(apid, addr, value);
+ 	IOLockUnlock(sp_lock);
+-	return -1;
++	return result;
++}
++
++int
++peridot_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
++{
++	return sp_access(sid, addr, out, false);
++}
++
++int
++peridot_spmi_write(unsigned sid, unsigned addr, uint8_t val)
++{
++	return sp_access(sid, addr, &val, true);
+ }
+ #endif /* ARM64_BOARD_CONFIG_PERIDOT */
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -40,6 +40,8 @@
+ #include <net/dlil.h>
+ #include <sys/kern_event.h>
+ 
++#include "peridot_spmi.h"
++
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void peridot_usb_probe(void);
+ static void peridot_usb_gadget_start(vm_offset_t dwc);
+@@ -169,6 +171,89 @@
+ 	    usb_rd(phy, 0x60));
+ }
+ 
++/*
++ * The eUSB2 PHY has no analog USB2 transceiver: the PM7550BA repeater
++ * (SPMI SID 7, peripheral 0xfd00) drives D+/D- and owns VBUS detection.
++ * ABL re-enables it for fastboot, so it may be off here; without it the
++ * PHY never pulls D+ up and the host sees no connect. Sequence from the
++ * downstream repeater-qti-pmic-eusb2.c driver with peridot's device-mode
++ * parameter overrides.
++ */
++#define RPTR_SID        7
++#define RPTR_BASE       0xfd00
++#define RPTR_EN_CTL1    0x46
++#define RPTR_STATUS     0x08
++#define RPTR_RPTR_EN   (1u << 7)
++#define RPTR_RPTR_OK   (1u << 7)
++
++static int
++rptr_rd(unsigned reg, uint8_t *value)
++{
++	return peridot_spmi_read(RPTR_SID, RPTR_BASE + reg, value);
++}
++
++static int
++rptr_wr(unsigned reg, uint8_t value)
++{
++	return peridot_spmi_write(RPTR_SID, RPTR_BASE + reg, value);
++}
++
++static void
++peridot_usb_repeater_on(void)
++{
++	/* value, register pairs from the DT qcom,param-override-seq */
++	static const uint8_t tune[][2] = {
++		{ 0x00, 0x50 }, { 0x0c, 0x51 }, { 0x03, 0x52 }, { 0x07, 0x53 },
++		{ 0x02, 0x54 }, { 0x03, 0x55 }, { 0x00, 0x56 }, { 0x04, 0x57 },
++		{ 0x02, 0x58 }, { 0x00, 0x59 }, { 0x03, 0x5a }, { 0x02, 0x5b },
++		{ 0x00, 0x5c },
++	};
++	uint8_t value = 0;
++	unsigned i;
++
++	if (peridot_spmi_init() != 0) {
++		printf("PERIDOT USB: repeater SPMI unavailable\n");
++		return;
++	}
++	if (rptr_rd(0x00, &value) != 0) {
++		printf("PERIDOT USB: repeater not responding (SID %u, 0x%x)\n",
++		    RPTR_SID, RPTR_BASE);
++		return;
++	}
++	printf("PERIDOT USB: repeater revision 0x%02x\n", value);
++	/* Bring out of reset (RPTR_EN) before the tuning writes. */
++	if (rptr_rd(RPTR_EN_CTL1, &value) != 0) {
++		return;
++	}
++	if (rptr_wr(RPTR_EN_CTL1, value | RPTR_RPTR_EN) != 0) {
++		printf("PERIDOT USB: repeater RPTR_EN failed\n");
++		return;
++	}
++	for (i = 0; i < sizeof(tune) / sizeof(tune[0]); i++) {
++		if (rptr_wr(tune[i][1], tune[i][0]) != 0) {
++			printf("PERIDOT USB: repeater tune 0x%02x failed\n",
++			    tune[i][1]);
++			break;
++		}
++	}
++	/* Device mode: clear the 19.2 MHz host-mode workaround. */
++	if (rptr_rd(0xe8, &value) == 0) {
++		(void)rptr_wr(0xe8, value & ~0x40);
++	}
++	if (rptr_rd(0xed, &value) == 0) {
++		(void)rptr_wr(0xed, value & ~0x40);
++	}
++	for (i = 0; i < 100; i++) {
++		if (rptr_rd(RPTR_STATUS, &value) == 0 &&
++		    (value & RPTR_RPTR_OK)) {
++			break;
++		}
++		delay(1);
++	}
++	printf("PERIDOT USB: repeater status 0x%02x (%s)\n", value,
++	    (value & RPTR_RPTR_OK) ? "OK" : "NOT OK");
++}
++
+ void
+ peridot_usb_probe(void)
+ {
+@@ -214,6 +299,7 @@
+ 	    usb_rd(dwc, 0xc140));
+ 	if (enabled >= 2) {
+ 		peridot_usb_power_on(gcc);
++		peridot_usb_repeater_on();
+ 		printf("PERIDOT USB: after power-on GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
+ 		    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc704));
+ 		peridot_usb_gadget_start(dwc);
