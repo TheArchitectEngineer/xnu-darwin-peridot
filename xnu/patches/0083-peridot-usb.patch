@@ -1,0 +1,142 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -2,13 +2,16 @@
+  * SWEET: USB bring-up, step 1 - read-only state probe.
+  *
+  * The phone's USB is a Synopsys DWC3 (USB 2.0 only, maximum-speed
+- * high-speed) at 0x0a600000 behind Qualcomm's dwc-usb3-msm wrapper, with a
+- * QUSB2 PHY at 0x088e2000; its power domain is the USB30_PRIM GDSC and its
+- * clocks come from GCC (offsets from Linux gcc-sdmmagpie.c). ABL uses this
+- * controller for fastboot; this probe only reports what state it is left
+- * in after `fastboot boot`. It never writes a register, and it touches the
+- * DWC3 / PHY register blocks only when the GCC status registers say their
+- * power domain and clocks are on (an access to a gated block would hang).
++ * high-speed) at 0x0a600000 behind Qualcomm's dwc-usb3-msm wrapper, with an
++ * eUSB2 PHY at 0x088e3000; its power domain is the USB30_PRIM GDSC and its
++ * clocks come from GCC (offsets from the downstream gcc-cliffs.c driver).
++ * The wrapper register file is inside the DWC3 core_base window on this SoC
++ * (dwc3-qcom.c ioremaps reg[0] as "qscratch"), unlike sweet's separate
++ * 0xa6f8800 block. ABL uses this controller for fastboot; this probe only
++ * reports what state it is left in after `fastboot boot`. It never writes a
++ * register, and it touches the DWC3 / PHY register blocks only when the GCC
++ * status registers say their power domain and clocks are on (an access to a
++ * gated block would hang).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -43,27 +46,27 @@
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+ #define GCC_PA                  0x00100000
+-#define GCC_SIZE                0x00090000
+-#define GCC_USB30_PRIM_GDSCR    0x0f004         /* bit 31: power on */
++#define GCC_SIZE                0x001f4200      /* DT gcc@100000 range */
++#define GCC_USB30_PRIM_GDSCR    0x39004         /* bit 31: power on */
+ #define CBCR_CLK_OFF            (1u << 31)
+ 
+ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+ } usb_cbcr[] = {
+-	{ "master", 0x0f010 },
+-	{ "sleep", 0x0f014 },
+-	{ "utmi", 0x0f018 },
+-	{ "cfg-noc-axi", 0x0502c },
+-	{ "aggre-axi", 0x8201c },
+-	{ "ahb2phy", 0x6a004 },
+-	{ "clkref", 0x8c010 },
++	{ "master", 0x39018 },
++	{ "sleep", 0x39024 },
++	{ "mock-utmi", 0x39028 },
++	{ "cfg-noc-axi", 0x39088 },
++	{ "aggre-axi", 0x3908c },
++	{ "phy-aux", 0x39060 },
++	{ "phy-com-aux", 0x39064 },
+ };
+ 
+ #define DWC3_PA                 0x0a600000
+ #define DWC3_SIZE               0x0000d000
+-#define QUSB2_PA                0x088e2000
+-#define QUSB2_SIZE              0x00000400
++#define EUSB2_PHY_PA            0x088e3000      /* DT hsphy@88e3000 */
++#define EUSB2_PHY_SIZE          0x00000400
+ 
+ static uint32_t
+ usb_rd(vm_offset_t base, uint32_t off)
+@@ -119,19 +122,20 @@
+ 	if (enabled >= 2) {
+ 		sweet_usb_gadget_start(dwc);
+ 	}
+-	if (cbcr[5] & CBCR_CLK_OFF) {
+-		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
++	if (cbcr[0] & CBCR_CLK_OFF) {
++		printf("SWEET USB: master clock off; eUSB2 PHY not read\n");
+ 		return;
+ 	}
+-	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
++	vm_offset_t phy = ml_io_map(EUSB2_PHY_PA, EUSB2_PHY_SIZE);
+ 	if (phy == 0) {
+ 		return;
+ 	}
+-	/* DT qcom,qusb-phy-reg-offset order (Linux phy-msm-qusb-v2.c): PORT_TUNE1 0x240,
+-	 * PLL_COMMON_STATUS_ONE 0x1a0, PWR_CTRL1 0x210, INTR_CTRL 0x230,
+-	 * PLL_CORE_INPUT_OVERRIDE 0x0a8, TEST1 0x254. */
+-	printf("SWEET USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
+-	    usb_rd(phy, 0x1a0), usb_rd(phy, 0x210), usb_rd(phy, 0x240), usb_rd(phy, 0x254));
++	/* eUSB2 PHY register addresses (downstream phy-msm-snps-eusb2.c):
++	 * UTMI_CTRL0 0x3c, UTMI_CTRL5 0x50, HS_PHY_CTRL_COMMON0 0x54,
++	 * CFG_CTRL_1 0x58, UTMI_PHY_CMN_CTRL0 0x98. */
++	printf("SWEET USB: eUSB2 UTMI_CTRL0 0x%08x UTMI_CTRL5 0x%08x COMMON0 0x%08x CFG_CTRL_1 0x%08x CMN_CTRL0 0x%08x\n",
++	    usb_rd(phy, 0x3c), usb_rd(phy, 0x50), usb_rd(phy, 0x54), usb_rd(phy, 0x58),
++	    usb_rd(phy, 0x98));
+ }
+ 
+ /*
+@@ -162,17 +166,19 @@
+ #define DEPCMD(n)       (0xc80c + 0x10 * (n))
+ 
+ /*
+- * Qualcomm wrapper registers ("QSCRATCH", core base + 0xf8800). The
+- * controller only connects (pull-up on D+) while it sees a valid VBUS
+- * session; Linux dwc3-qcom forces that in software when the charger
+- * reports a cable (dwc3_qcom_vbus_override_enable).
++ * Qualcomm wrapper registers ("QSCRATCH"). The controller only connects
++ * (pull-up on D+) while it sees a valid VBUS session; Linux dwc3-qcom
++ * forces that in software when the charger reports a cable
++ * (dwc3_qcom_vbus_override_enable). On cliffs there is no separate
++ * qscratch reg range: dwc3-qcom.c maps reg[0] (the DWC3 core_base) as the
++ * wrapper base and writes the same offsets there.
+  */
+-#define QSCRATCH_PA             0x0a6f8800
+ #define QSCRATCH_HS_PHY_CTRL    0x10
+ #define   UTMI_OTG_VBUS_VALID   (1u << 20)
+ #define   SW_SESSVLD_SEL        (1u << 28)
+ #define QSCRATCH_SS_PHY_CTRL    0x30
+ #define   LANE0_PWR_PRESENT     (1u << 24)
++#define QSCRATCH_GENERAL_CFG    0x08
+ 
+ #define DCTL_RUN_STOP   (1u << 31)
+ #define DCTL_CSFTRST    (1u << 30)
+@@ -902,16 +908,15 @@
+ 	dwc_wr(DALEPENA, 0x3);
+ 	ud_start_setup();
+ 
+-	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
+-	if (qs != 0) {
+-		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
++	{
++		uint32_t hs = usb_rd(dwc, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(dwc, QSCRATCH_SS_PHY_CTRL);
+ 		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+-		    hs, ss, usb_rd(qs, 0x08));
+-		*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
+-		*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
++		    hs, ss, usb_rd(dwc, QSCRATCH_GENERAL_CFG));
++		*(volatile uint32_t *)(dwc + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
++		*(volatile uint32_t *)(dwc + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		printf("SWEET USB: VBUS override on: HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x\n",
+-		    usb_rd(qs, QSCRATCH_HS_PHY_CTRL), usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
++		    usb_rd(dwc, QSCRATCH_HS_PHY_CTRL), usb_rd(dwc, QSCRATCH_SS_PHY_CTRL));
+ 	}
+ 
+ 	dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
