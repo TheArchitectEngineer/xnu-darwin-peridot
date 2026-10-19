@@ -13,26 +13,35 @@
  *     (LoadImage from buffer, no device path — hence the fixed tail address).
  *
  * Kernel placement (block-mapping contract of osfmk/arm64/start.s):
- *   - The CI kernel (xnu-8796.141.3, darwin-xnu-build recipe) is a 0-based PIE:
- *     __TEXT.vmaddr == 0, LC_MAIN entry, classic LC_DYLD_INFO_ONLY rebases.
+ *   - Two kernel flavours are handled:
+ *       * legacy 0-based PIE: __TEXT.vmaddr == 0, LC_MAIN entry and a
+ *         classic LC_DYLD_INFO_ONLY rebase stream (every pointer needs
+ *         +XNU_KVA_BASE before handoff);
+ *       * natively linked: __TEXT.vmaddr == the link base (e.g.
+ *         0xfffffe0007004000), LC_UNIXTHREAD entry, no rebases — the
+ *         pointers already carry their final VAs, so the kernel is mapped
+ *         at its own link base (virtBase == link base, slide 0).
  *   - The load base is chosen from the actual EFI memory map (conventional
- *     descriptors), 32MB-aligned, big enough for kernel + 16MB headroom, and
- *     never overlapping the BootShim/payload RAM. The image is copied so that
- *     link VA v maps to physical mLoadBase + v; the mach header therefore
- *     lands exactly at mLoadBase. start.cpu.s locates the mach header via
- *     "adrp _mh_execute_header" at runtime, which requires this layout.
- *   - boot_args: physBase = mLoadBase, virtBase = XNU_KVA_BASE, and start.s
- *     block pairing needs virtBase mod 32MB == physBase mod 32MB; since the
- *     load base is 32MB-aligned and virtBase is 32MB-aligned, both are 0 for
- *     every possible choice. virtBase is also the kernel VA slide (link base
- *     == 0), and start.s's ptovirt reduction gives kva(v) = v + virtBase for
- *     every loaded byte, matching the applied rebases for every base.
- *   - The LC_DYLD_INFO rebase opcode stream is parsed and each REBASE_TYPE_
- *     POINTER slot gains XNU_KVA_BASE before handoff (the image is fully
- *     pre-linked; there are no binds).
- *   - Entry = LC_MAIN entryoff. The jump happens at EL1 with MMU off; if we
- *     are at EL2 we drop to EL1 via ERET first (HCR=0, CNTVOFF=0, timers
- *     accessible from EL1). x0 = physical pointer of boot_args.
+ *     descriptors), big enough for kernel + 16MB headroom, and never
+ *     overlapping the BootShim/payload RAM. It also preserves the start.s
+ *     block-pairing invariant "physBase mod 32MB == virtBase mod 32MB" by
+ *     carrying the link base's low 25 bits. The image is copied so that
+ *     link VA v maps to physical mLoadBase + (v - link base); the mach
+ *     header therefore lands exactly at mLoadBase, which start.cpu.s relies
+ *     on ("adrp _mh_execute_header" at runtime).
+ *   - boot_args: physBase = mLoadBase, virtBase = mKvaBase (link base for
+ *     natively linked kernels, XNU_KVA_BASE for the PIE), memSize = flat
+ *     span from the chosen region (capped). start.s's ptovirt reduction
+ *     then yields kva(pa) = pa - physBase + virtBase for every loaded byte.
+ *   - The LC_DYLD_INFO rebase opcode stream, when present, is parsed and
+ *     each REBASE_TYPE_POINTER slot gains the slide (virtBase - link base)
+ *     before handoff (the image is fully pre-linked; there are no binds).
+ *   - The /chosen dram-base/dram-size properties are rewritten to the
+ *     runtime placement before handoff.
+ *   - Entry: LC_MAIN entryoff or the LC_UNIXTHREAD pc. The jump happens at
+ *     EL1 with MMU off; if we are at EL2 we drop to EL1 via ERET first
+ *     (HCR=0, CNTVOFF=0, timers accessible from EL1). x0 = physical pointer
+ *     of boot_args.
  *
  * Memory model reported to XNU: flat span [physBase, physBase+memSize) where
  * both come from the chosen load region (capped at XNU_MEM_SIZE_CAP). Boot
@@ -54,7 +63,7 @@
 #define BOOTSHIM_TAIL_PTR_ADDR  0xA7400000ULL
 
 #define XNU_MEM_SIZE_CAP        0x38000000ULL   /* reported memSize cap               */
-#define XNU_KVA_BASE            0xFFFFFFF008000000ULL   /* virtBase == VA slide       */
+#define XNU_KVA_BASE            0xFFFFFFF008000000ULL   /* virtBase for 0-based PIE   */
 #define XNU_HEADROOM            0x01000000ULL   /* 16MB window for args + ADT         */
 #define XNU_LOAD_ALIGN          0x02000000ULL   /* 32MB: block-map invariant          */
 
@@ -70,6 +79,9 @@
 #define LC_DYLD_INFO            0x1DU
 #define LC_DYLD_INFO_ONLY       0x80000022U   /* NOT 0x22! */
 #define LC_MAIN                 0x80000028U
+
+#define ARM_THREAD_STATE64      6U            /* LC_UNIXTHREAD flavor       */
+#define ARM_THREAD_STATE64_PC_OFF 256U        /* state: x[29],fp,lr,sp,pc    */
 
 /* dyld rebase opcodes — per EXTERNAL_HEADERS/mach-o/loader.h (xnu-8796.141.3):
  *   0x10 SET_TYPE_IMM           imm   = type
@@ -207,8 +219,12 @@ STATIC UINT64 mSegFileOff[MAX_SEGMENTS];
 STATIC UINT64 mSegFileSize[MAX_SEGMENTS];
 STATIC UINT64 mSegVmSize[MAX_SEGMENTS];
 
-STATIC UINT64 mEntryFileOff = 0;
-STATIC UINT64 mLoadEnd = 0;
+STATIC UINT64 mKernelLinkBase = 0;  /* __TEXT.vmaddr (0 = legacy 0-based PIE) */
+STATIC UINT64 mEntryFileOff = 0;   /* LC_MAIN entryoff (link-relative)      */
+STATIC UINT64 mEntryVa = 0;        /* absolute entry VA (LC_MAIN or thread) */
+STATIC UINT64 mKvaBase = 0;        /* virtBase handed to the kernel         */
+STATIC UINT64 mSlide = 0;          /* mKvaBase - mKernelLinkBase            */
+STATIC UINT64 mLoadEnd = 0;        /* image span relative to link base      */
 STATIC UINT64 mRebaseOff = 0;
 STATIC UINT64 mRebaseSize = 0;
 
@@ -329,7 +345,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
         switch (Cmd->cmd) {
             case LC_SEGMENT_64: {
                 segment_command_64 *Seg = (segment_command_64 *)CmdPtr;
-                UINT64 SegEnd = Seg->vmaddr + Seg->vmsize;
+                UINT64 SegEnd;
 
                 if (mSegCount >= MAX_SEGMENTS) {
                     Print (L"Xnuload: Too many segments (%u)\n", mSegCount);
@@ -337,10 +353,15 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 }
                 if (!SeenText) {
                     SeenText = TRUE;
-                    if (Seg->vmaddr != 0) {
-                        Print (L"Xnuload: Only 0-based PIE kernels supported "
-                               L"(link base 0x%Lx)\n", Seg->vmaddr);
-                        return EFI_UNSUPPORTED;
+                    /* __TEXT.vmaddr is the link base: 0 for the legacy
+                     * 0-based PIE kernels, the real anchor VA (e.g.
+                     * 0xfffffe0007004000) for natively linked ones. */
+                    mKernelLinkBase = Seg->vmaddr;
+                    if ((mKernelLinkBase & 0xFFF) != 0 ||
+                        mKernelLinkBase > 0xFFFFFFFF00000000ULL) {
+                        Print (L"Xnuload: Bogus kernel link base 0x%Lx\n",
+                               mKernelLinkBase);
+                        return EFI_LOAD_ERROR;
                     }
                 }
 
@@ -350,8 +371,24 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 mSegVmSize[mSegCount]   = Seg->vmsize;
                 mSegCount++;
 
-                if (Seg->vmsize > SIZE_128MB) {
-                    Print (L"Xnuload: Segment image too large (0x%Lx)\n", Seg->vmsize);
+                /* Empty placeholder segments (__PRELINK_*, __LAST, __CTF)
+                 * load nothing; some sit deliberately below the link base
+                 * (__PRELINK_TEXT lives at 0xfffffe0004004000). Keep them
+                 * in the array for rebase segment indexing, but never load
+                 * or size-check them. */
+                if (Seg->vmsize == 0 && Seg->filesize == 0) {
+                    break;
+                }
+                if (Seg->vmaddr < mKernelLinkBase) {
+                    Print (L"Xnuload: Segment below link base (0x%Lx < 0x%Lx)\n",
+                           Seg->vmaddr, mKernelLinkBase);
+                    return EFI_LOAD_ERROR;
+                }
+
+                SegEnd = Seg->vmaddr + Seg->vmsize - mKernelLinkBase;
+
+                if (SegEnd > SIZE_128MB) {
+                    Print (L"Xnuload: Segment image too large (0x%Lx)\n", SegEnd);
                     return EFI_LOAD_ERROR;
                 }
                 if (SegEnd > mLoadEnd) {
@@ -362,13 +399,33 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
 
             case LC_MAIN: {
                 entry_point_command *Ep = (entry_point_command *)CmdPtr;
-                mEntryFileOff = Ep->entryoff;
+                if (mEntryFileOff == 0 && mEntryVa == 0 &&
+                    Ep->entryoff != 0 && Ep->entryoff < mKernelSize) {
+                    mEntryFileOff = Ep->entryoff;
+                }
                 break;
             }
 
-            case LC_UNIXTHREAD:
-                Print (L"Xnuload: LC_UNIXTHREAD unsupported (LC_MAIN expected)\n");
-                return EFI_UNSUPPORTED;
+            case LC_UNIXTHREAD: {
+                /* arm_thread_state64_t: x[29], fp, lr, sp, pc, cpsr */
+                UINT32 Flavor;
+
+                if (Cmd->cmdsize < 16 + ARM_THREAD_STATE64_PC_OFF + 8) {
+                    Print (L"Xnuload: LC_UNIXTHREAD too small (%u)\n",
+                           Cmd->cmdsize);
+                    return EFI_LOAD_ERROR;
+                }
+                Flavor = *(UINT32 *)(CmdPtr + 8);
+                if (Flavor != ARM_THREAD_STATE64) {
+                    Print (L"Xnuload: LC_UNIXTHREAD flavor %u unsupported\n",
+                           Flavor);
+                    return EFI_UNSUPPORTED;
+                }
+                if (mEntryVa == 0 && mEntryFileOff == 0) {
+                    mEntryVa = *(UINT64 *)(CmdPtr + 16 + ARM_THREAD_STATE64_PC_OFF);
+                }
+                break;
+            }
 
             case LC_DYLD_INFO:
             case LC_DYLD_INFO_ONLY: {
@@ -411,14 +468,32 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
         Print (L"Xnuload: Kernel image is empty\n");
         return EFI_LOAD_ERROR;
     }
-    if (mEntryFileOff == 0) {
+
+    if (mEntryVa == 0 && mEntryFileOff != 0) {
+        mEntryVa = mKernelLinkBase + mEntryFileOff;
+    }
+    if (mEntryVa == 0) {
         Print (L"Xnuload: No entry point found\n");
         return EFI_LOAD_ERROR;
     }
-    if (mRebaseOff == 0 || mRebaseSize == 0) {
-        Print (L"Xnuload: Kernel lacks a rebasable LC_DYLD_INFO stream\n");
+    if (mEntryVa < mKernelLinkBase ||
+        mEntryVa - mKernelLinkBase >= mLoadEnd) {
+        Print (L"Xnuload: Entry 0x%Lx outside loaded image\n", mEntryVa);
         return EFI_LOAD_ERROR;
     }
+
+    /* Legacy 0-based PIE kernels need the rebase stream to move to
+     * XNU_KVA_BASE; natively linked kernels keep their own VAs. */
+    if (mKernelLinkBase == 0) {
+        mKvaBase = XNU_KVA_BASE;
+        if (mRebaseOff == 0 || mRebaseSize == 0) {
+            Print (L"Xnuload: 0-based kernel lacks a rebasable LC_DYLD_INFO stream\n");
+            return EFI_LOAD_ERROR;
+        }
+    } else {
+        mKvaBase = mKernelLinkBase;
+    }
+    mSlide = mKvaBase - mKernelLinkBase;
 
     return EFI_SUCCESS;
 }
@@ -428,12 +503,13 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
 /*                                                                      */
 /* The kernel must load into RAM that UEFI actually leaves free, so we   */
 /* scan the memory map for conventional descriptors and pick the ranges */
-/* that can hold kernel + headroom above a 32MB-aligned address, sorted  */
-/* by the room they leave above that address. AllocateAddress is then    */
-/* tried against the candidates in order. Ranges overlapping the         */
-/* payload/tail RAM (which we still read from) are skipped. Because the  */
-/* base is 32MB-aligned, the start.s block-pairing invariant and the     */
-/* slide math are valid for every possible choice.                      */
+/* that can hold kernel + headroom at a centred 32MB-aligned address     */
+/* (candidate base carries the link base's low 25 bits), sorted by the  */
+/* room they leave above that address. AllocateAddress is then tried    */
+/* against the candidates in order. Ranges overlapping the payload/tail */
+/* RAM (which we still read from) are skipped. Because physBase keeps   */
+/* the link base's low bits, the start.s block-pairing invariant and    */
+/* the kva() math are valid for every possible choice.                  */
 /* ------------------------------------------------------------------ */
 #define LOAD_BASE_CANDIDATES 6
 
@@ -551,13 +627,18 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
         }
 
         for (Range = 0; Range < RangeCount; Range++) {
-            UINT64 Base = (RangeStart[Range] + XNU_LOAD_ALIGN - 1) &
-                          ~(XNU_LOAD_ALIGN - 1);
+            /* Load base = first 32MB-aligned address at/above the range
+             * start, keeping the low bits of the kernel link base so that
+             * physBase mod 32MB == virtBase mod 32MB (start.s pairs its
+             * bootstrap block entries on that equality). */
+            UINT64 Off  = mKernelLinkBase & (XNU_LOAD_ALIGN - 1);
+            UINT64 Base = ((RangeStart[Range] + XNU_LOAD_ALIGN - 1) &
+                           ~(XNU_LOAD_ALIGN - 1)) | Off;
             UINT64 End  = RangeEnd[Range];
             UINT64 Span;
             UINTN  Pos;
 
-            /* Range too small to hold a 32MB-aligned address. */
+            /* Range too small to hold an aligned address. */
             if (Base >= End) {
                 continue;
             }
@@ -637,7 +718,7 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
 }
 
 /* ------------------------------------------------------------------ */
-/* Copy the segments: link VA v -> PA mLoadBase + v                     */
+/* Copy the segments: link VA v -> PA mLoadBase + (v - link base)       */
 /* ------------------------------------------------------------------ */
 STATIC EFI_STATUS LoadKernelImage (VOID)
 {
@@ -646,7 +727,12 @@ STATIC EFI_STATUS LoadKernelImage (VOID)
     ZeroMem ((VOID *)mLoadBase, mLoadEnd);
 
     for (SegIdx = 0; SegIdx < mSegCount; SegIdx++) {
-        UINT64 Pa = mLoadBase + mSegVa[SegIdx];
+        UINT64 Pa;
+
+        if (mSegFileSize[SegIdx] == 0) {
+            continue;               /* placeholder segment (PRELINK, __LAST) */
+        }
+        Pa = mLoadBase + (mSegVa[SegIdx] - mKernelLinkBase);
 
         if (mSegFileOff[SegIdx] > mKernelSize ||
             mSegFileOff[SegIdx] + mSegFileSize[SegIdx] > mKernelSize) {
@@ -666,7 +752,8 @@ STATIC EFI_STATUS LoadKernelImage (VOID)
 
 /* ------------------------------------------------------------------ */
 /* Apply the LC_DYLD_INFO rebase opcode stream                          */
-/*   The kernel is 0-based PIE, so segment PA = mLoadBase + vmaddr      */
+/*   Slot PA = mLoadBase + (seg VA - link base) + offset; natively      */
+/*   linked kernels have slide 0 and no rebase stream at all.           */
 /* ------------------------------------------------------------------ */
 STATIC EFI_STATUS ApplyRebases (VOID)
 {
@@ -676,11 +763,11 @@ STATIC EFI_STATUS ApplyRebases (VOID)
     UINT64 Slots = 0;
     UINT32 CurType = 0;
 
-    if (mRebaseOff == 0 || mRebaseSize == 0) {
+    if (mSlide == 0 || mRebaseOff == 0 || mRebaseSize == 0) {
         return EFI_SUCCESS;               /* nothing to fixup */
     }
 
-    Slide   = XNU_KVA_BASE;               /* link base == 0   */
+    Slide   = mSlide;                     /* XNU_KVA_BASE for the PIE  */
     Stream  = mKernelPtr + mRebaseOff;
     End     = Stream + mRebaseSize;
 
@@ -714,7 +801,7 @@ STATIC EFI_STATUS ApplyRebases (VOID)
                        SegIdx, mSegCount);
                 return EFI_LOAD_ERROR;
             }
-            CurSeg = mSegVa[SegIdx];
+            CurSeg = mSegVa[SegIdx] - mKernelLinkBase;
             CurOff = ReadUleb (&Stream);
         } else if (Hi == RP_ADD_ADDR_ULEB) {
             CurOff += ReadUleb (&Stream);
@@ -867,6 +954,78 @@ STATIC VOID Handoff (
 }
 
 /* ------------------------------------------------------------------ */
+/* Rewrite the /chosen dram-base/dram-size ADT properties               */
+/* ------------------------------------------------------------------ */
+/*
+ * ADT nodes are {u32 nprops, u32 nchildren, props..., children...} and
+ * properties are {char name[32], u32 size (bit31 = placeholder flag),
+ * value padded to 4 bytes}; all integers are little-endian (tools/mkadt.py
+ * serializes this exact layout). dram-base and dram-size are unique u64
+ * properties in the peridot tree, so a full walk can patch both.
+ */
+STATIC UINTN mAdtPatched = 0;
+
+STATIC BOOLEAN AdtNameIs (UINT8 *Name, CONST CHAR8 *Want)
+{
+    UINTN Len = AsciiStrLen (Want);
+    return (CompareMem (Name, Want, Len) == 0) && (Name[Len] == 0);
+}
+
+STATIC UINTN PatchAdtNode (
+    UINT8   *Adt,
+    UINTN    Size,
+    UINTN    Off,
+    UINT64   DramBase,
+    UINT64   DramSize
+    )
+{
+    UINT32 NProps = 0;
+    UINT32 NChild = 0;
+    UINT32 i;
+
+    if (Off + 8 > Size) {
+        return Size;
+    }
+    CopyMem (&NProps, Adt + Off, 4);
+    CopyMem (&NChild, Adt + Off + 4, 4);
+    Off += 8;
+
+    for (i = 0; i < NProps; i++) {
+        UINT32 PSize;
+        UINTN  Len;
+        UINTN  Advance;
+
+        if (Off + 36 > Size) {
+            return Size;
+        }
+        CopyMem (&PSize, Adt + Off + 32, 4);
+        Len     = PSize & 0x7FFFFFFFU;
+        Advance = 36 + ((Len + 3) & ~3U);
+        if (Off + Advance > Size) {
+            return Size;
+        }
+
+        if (Len == 8 && AdtNameIs (Adt + Off, "dram-base")) {
+            CopyMem (Adt + Off + 36, &DramBase, 8);
+            mAdtPatched |= 1;
+        } else if (Len == 8 && AdtNameIs (Adt + Off, "dram-size")) {
+            CopyMem (Adt + Off + 36, &DramSize, 8);
+            mAdtPatched |= 2;
+        }
+        Off += Advance;
+    }
+
+    for (i = 0; i < NChild; i++) {
+        if (Off >= Size) {
+            break;
+        }
+        Off = PatchAdtNode (Adt, Size, Off, DramBase, DramSize);
+    }
+
+    return Off;
+}
+
+/* ------------------------------------------------------------------ */
 /* EFI entry point                                                      */
 /* ------------------------------------------------------------------ */
 EFI_STATUS
@@ -894,7 +1053,7 @@ UefiMain (
     UINTN                  Attempt;
     UINT64                 CurrentEl;
 
-    Print (L"[Xnuload] Darwin/XNU loader v7-dtva (Mu-Silicium UEFI, peridot)\n");
+    Print (L"[Xnuload] Darwin/XNU loader v8 (Mu-Silicium UEFI, peridot)\n");
 
     __asm__ __volatile__ ("mrs %0, CurrentEL" : "=r" (CurrentEl));
     Print (L"[Xnuload] CurrentEL 0x%Lx\n", CurrentEl);
@@ -920,12 +1079,12 @@ UefiMain (
 
     Print (L"[Xnuload] Kernel 0x%Lx bytes @ 0x%Lx, DT 0x%Lx bytes @ 0x%Lx\n",
            mKernelSize, mKernelPtr, mDeviceTreeSize, mDeviceTree);
-    Print (L"[Xnuload] Rebase stream @ +0x%Lx size 0x%Lx, first 8 op 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
-           mRebaseOff, mRebaseSize,
-           mKernelPtr[mRebaseOff + 0], mKernelPtr[mRebaseOff + 1],
-           mKernelPtr[mRebaseOff + 2], mKernelPtr[mRebaseOff + 3],
-           mKernelPtr[mRebaseOff + 4], mKernelPtr[mRebaseOff + 5],
-           mKernelPtr[mRebaseOff + 6], mKernelPtr[mRebaseOff + 7]);
+    Print (L"[Xnuload] link base 0x%Lx, entry VA 0x%Lx, KVA base 0x%Lx (slide 0x%Lx)\n",
+           mKernelLinkBase, mEntryVa, mKvaBase, mSlide);
+    if (mRebaseSize != 0) {
+        Print (L"[Xnuload] Rebase stream @ +0x%Lx size 0x%Lx\n",
+               mRebaseOff, mRebaseSize);
+    }
 
     KernelLoadSize = (mLoadEnd + 0x1FFFFULL) & ~0x1FFFFULL;   /* 128KB align */
     if (KernelLoadSize == 0 || KernelLoadSize > SIZE_128MB) {
@@ -971,6 +1130,17 @@ UefiMain (
     DtbPa = HeadroomBase;
     if (mDeviceTree != NULL && mDeviceTreeSize != 0) {
         CopyMem ((VOID *)DtbPa, mDeviceTree, mDeviceTreeSize);
+        /* The kernel walks the ADT with the MMU on and expects the DRAM
+         * window to start at the runtime physBase, which is not the
+         * mkadt default (the load base carries the link base's low bits). */
+        PatchAdtNode ((UINT8 *)DtbPa, mDeviceTreeSize, 0, mLoadBase, MemSize);
+        if (mAdtPatched != 3) {
+            Print (L"Xnuload: ADT dram-base/dram-size props missing (0x%x)\n",
+                   mAdtPatched);
+            return EFI_LOAD_ERROR;
+        }
+        Print (L"[Xnuload] ADT dram-base/dram-size rewritten to 0x%Lx/0x%Lx\n",
+               mLoadBase, MemSize);
     }
     ArgsPa = (DtbPa + mDeviceTreeSize + 0x3FFFULL) & ~0x3FFFULL;
     Args   = (boot_args *)ArgsPa;
@@ -982,12 +1152,12 @@ UefiMain (
     ZeroMem (Args, sizeof (boot_args));
     Args->Revision = 2;
     Args->Version  = 2;
-    Args->virtBase = XNU_KVA_BASE;
+    Args->virtBase = mKvaBase;
     Args->physBase = mLoadBase;
     Args->memSize  = MemSize;
     Args->topOfKernelData = TopOfKernelData;
     /* xnu reads the device tree with the MMU on: it must be a VA. */
-    Args->deviceTreeP       = DtbPa - mLoadBase + XNU_KVA_BASE;
+    Args->deviceTreeP       = DtbPa - mLoadBase + mKvaBase;
     Args->deviceTreeLength  = (UINT32)mDeviceTreeSize;
     Args->bootFlags         = 0;
     Args->machineType       = 0;
@@ -996,7 +1166,7 @@ UefiMain (
     Args->Video.v_display = 1;
     AsciiStrCpyS (Args->CommandLine, BOOT_LINE_LENGTH, BOOTARG_STRING);
 
-    EntryPa = mLoadBase + mEntryFileOff;
+    EntryPa = mLoadBase + (mEntryVa - mKernelLinkBase);
 
     Print (L"[Xnuload] physBase 0x%Lx, virtBase 0x%Lx, memSize 0x%Lx\n",
            Args->physBase, Args->virtBase, Args->memSize);
