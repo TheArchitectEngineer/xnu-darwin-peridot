@@ -8,6 +8,7 @@
  *     each 16-byte aligned):
  *         [pad] "XNUKERN1" | u64 size | kernel Mach-O
  *         [pad] "XNUFDT01" | u64 size | Apple device tree (ADT)
+ *         [pad] "XNUROOT1" | u64 size | HFS+ ram disk (optional)
  *   - This EFI application is embedded into the FV as USAGE=APPLICATION with
  *     GUID 7A3B1C2D-4E5F-4061-8234-9A0B1C2D3E4F and launched by BootManagerLib
  *     (LoadImage from buffer, no device path — hence the fixed tail address).
@@ -37,7 +38,9 @@
  *     each REBASE_TYPE_POINTER slot gains the slide (virtBase - link base)
  *     before handoff (the image is fully pre-linked; there are no binds).
  *   - The /chosen dram-base/dram-size properties are rewritten to the
- *     runtime placement before handoff.
+ *     runtime placement before handoff, and /chosen/memory-map/RAMDisk is
+ *     pointed at a ram disk image (placed right after the kernel inside the
+ *     reserved region) so IOFindBSDRoot can create md0 with "rd=md0".
  *   - Entry: LC_MAIN entryoff or the LC_UNIXTHREAD pc. The jump happens at
  *     EL1 with MMU off; if we are at EL2 we drop to EL1 via ERET first
  *     (HCR=0, CNTVOFF=0, timers accessible from EL1). x0 = physical pointer
@@ -69,6 +72,7 @@
 
 #define XNUKERN1_MAGIC          0x314E52454B554E58ULL  /* "XNUKERN1" */
 #define XNUFDT01_MAGIC          0x3130544446554E58ULL  /* "XNUFDT01" */
+#define XNUROOT1_MAGIC          0x31544F4F52554E58ULL  /* "XNUROOT1" */
 
 #define MH_MAGIC_64             0xfeedfacfU
 #define CPU_TYPE_ARM64          0x0100000cU
@@ -104,6 +108,7 @@
 #define RP_DO_REBASE_ADD_ADDR_ULEB             0x70
 #define RP_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB  0x80
 
+/* Base command line; " rd=md0" is appended when a ram disk is present. */
 #define BOOTARG_STRING          "-v keepsyms=1 debug=0x14e serial=3"
 
 #define BOOT_LINE_LENGTH        608
@@ -209,9 +214,11 @@ typedef struct {
 /* Globals collected from the kernel image                             */
 /* ------------------------------------------------------------------ */
 STATIC UINT8  *mKernelPtr = NULL;
-STATIC UINT64  mKernelSize = 0;
-STATIC UINT8  *mDeviceTree = NULL;
-STATIC UINT64  mDeviceTreeSize = 0;
+STATIC UINT64 mKernelSize = 0;
+STATIC UINT8 *mDeviceTree = NULL;
+STATIC UINT64 mDeviceTreeSize = 0;
+STATIC UINT8 *mRamdiskPtr = NULL;
+STATIC UINT64 mRamdiskSize = 0;
 
 STATIC UINT32 mSegCount = 0;
 STATIC UINT64 mSegVa[MAX_SEGMENTS];
@@ -274,7 +281,8 @@ STATIC EFI_STATUS ParseTailBlocks (IN UINT64 TailAddr)
         /* Look for the next block magic within a small pad window. */
         for (Probe = 0; Probe <= 16; Probe += 8) {
             Magic = *(UINT64 *)(BlockAddr + Probe);
-            if (Magic == XNUKERN1_MAGIC || Magic == XNUFDT01_MAGIC) {
+            if (Magic == XNUKERN1_MAGIC || Magic == XNUFDT01_MAGIC ||
+                Magic == XNUROOT1_MAGIC) {
                 Found = TRUE;
                 break;
             }
@@ -292,6 +300,9 @@ STATIC EFI_STATUS ParseTailBlocks (IN UINT64 TailAddr)
         if (Magic == XNUKERN1_MAGIC) {
             mKernelPtr  = (UINT8 *)BlockAddr + 16;
             mKernelSize = Size;
+        } else if (Magic == XNUROOT1_MAGIC) {
+            mRamdiskPtr  = (UINT8 *)BlockAddr + 16;
+            mRamdiskSize = Size;
         } else {
             mDeviceTree     = (UINT8 *)BlockAddr + 16;
             mDeviceTreeSize = Size;
@@ -960,8 +971,9 @@ STATIC VOID Handoff (
  * ADT nodes are {u32 nprops, u32 nchildren, props..., children...} and
  * properties are {char name[32], u32 size (bit31 = placeholder flag),
  * value padded to 4 bytes}; all integers are little-endian (tools/mkadt.py
- * serializes this exact layout). dram-base and dram-size are unique u64
- * properties in the peridot tree, so a full walk can patch both.
+ * serializes this exact layout). dram-base/dram-size are unique u64
+ * properties in the peridot tree; RAMDisk (memory-map, 2x u64) exists only
+ * when mkadt.py was asked for it. All three get the runtime values.
  */
 STATIC UINTN mAdtPatched = 0;
 
@@ -976,7 +988,9 @@ STATIC UINTN PatchAdtNode (
     UINTN    Size,
     UINTN    Off,
     UINT64   DramBase,
-    UINT64   DramSize
+    UINT64   DramSize,
+    UINT64   RdPa,
+    UINT64   RdSize
     )
 {
     UINT32 NProps = 0;
@@ -1011,6 +1025,11 @@ STATIC UINTN PatchAdtNode (
         } else if (Len == 8 && AdtNameIs (Adt + Off, "dram-size")) {
             CopyMem (Adt + Off + 36, &DramSize, 8);
             mAdtPatched |= 2;
+        } else if (Len == 16 && RdSize != 0 &&
+                   AdtNameIs (Adt + Off, "RAMDisk")) {
+            CopyMem (Adt + Off + 36, &RdPa, 8);
+            CopyMem (Adt + Off + 44, &RdSize, 8);
+            mAdtPatched |= 4;
         }
         Off += Advance;
     }
@@ -1019,7 +1038,7 @@ STATIC UINTN PatchAdtNode (
         if (Off >= Size) {
             break;
         }
-        Off = PatchAdtNode (Adt, Size, Off, DramBase, DramSize);
+        Off = PatchAdtNode (Adt, Size, Off, DramBase, DramSize, RdPa, RdSize);
     }
 
     return Off;
@@ -1038,6 +1057,8 @@ UefiMain (
     EFI_STATUS             Status;
     UINT64                 TailAddr;
     UINT64                 KernelLoadSize;
+    UINT64                 RamdiskLoadSize;
+    UINT64                 RamdiskPa;
     UINT64                 ReserveSize;
     UINT64                 HeadroomBase;
     UINT64                 DtbPa;
@@ -1053,7 +1074,7 @@ UefiMain (
     UINTN                  Attempt;
     UINT64                 CurrentEl;
 
-    Print (L"[Xnuload] Darwin/XNU loader v8 (Mu-Silicium UEFI, peridot)\n");
+    Print (L"[Xnuload] Darwin/XNU loader v9 (Mu-Silicium UEFI, peridot)\n");
 
     __asm__ __volatile__ ("mrs %0, CurrentEL" : "=r" (CurrentEl));
     Print (L"[Xnuload] CurrentEL 0x%Lx\n", CurrentEl);
@@ -1085,15 +1106,20 @@ UefiMain (
         Print (L"[Xnuload] Rebase stream @ +0x%Lx size 0x%Lx\n",
                mRebaseOff, mRebaseSize);
     }
+    if (mRamdiskSize != 0) {
+        Print (L"[Xnuload] Ram disk 0x%Lx bytes @ 0x%Lx\n",
+               mRamdiskSize, mRamdiskPtr);
+    }
 
     KernelLoadSize = (mLoadEnd + 0x1FFFFULL) & ~0x1FFFFULL;   /* 128KB align */
     if (KernelLoadSize == 0 || KernelLoadSize > SIZE_128MB) {
         Print (L"[Xnuload] Load size bogus (0x%Lx)\n", KernelLoadSize);
         return EFI_LOAD_ERROR;
     }
+    RamdiskLoadSize = (mRamdiskSize + 0x1FFFFULL) & ~0x1FFFFULL;
 
-    /* Reserve kernel + headroom so the EFI allocator doesn't touch it. */
-    ReserveSize = KernelLoadSize + XNU_HEADROOM;
+    /* Reserve kernel + ram disk + headroom so EFI leaves it alone. */
+    ReserveSize = KernelLoadSize + RamdiskLoadSize + XNU_HEADROOM;
     Status = ReserveKernelRegion (ReserveSize);
     if (EFI_ERROR (Status)) {
         return Status;
@@ -1104,6 +1130,12 @@ UefiMain (
     if (EFI_ERROR (Status)) {
         Print (L"[Xnuload] Segment load failed: %r\n", Status);
         return Status;
+    }
+
+    /* Ram disk right after the kernel, inside the same reservation. */
+    RamdiskPa = mLoadBase + KernelLoadSize;
+    if (mRamdiskSize != 0) {
+        CopyMem ((VOID *)RamdiskPa, mRamdiskPtr, mRamdiskSize);
     }
 
     /* Apply the rebases (this kernel needs it). */
@@ -1123,24 +1155,33 @@ UefiMain (
     }
 
     /* Headroom layout (per the reference loader):
-     *   [kernel end] ADT copy | 16K-align | boot_args (16K) — all BELOW
-     *   topOfKernelData, which arm_vm_physmap_init maps as the
+     *   [kernel] [ram disk] ADT copy | 16K-align | boot_args (16K) — all
+     *   BELOW topOfKernelData, which arm_vm_physmap_init maps as the
      *   end_kern..topOfKernelData region ("Device Tree, RAM Disk, bootArgs"). */
-    HeadroomBase = mLoadBase + KernelLoadSize;
+    HeadroomBase = mLoadBase + KernelLoadSize + RamdiskLoadSize;
     DtbPa = HeadroomBase;
     if (mDeviceTree != NULL && mDeviceTreeSize != 0) {
         CopyMem ((VOID *)DtbPa, mDeviceTree, mDeviceTreeSize);
         /* The kernel walks the ADT with the MMU on and expects the DRAM
          * window to start at the runtime physBase, which is not the
          * mkadt default (the load base carries the link base's low bits). */
-        PatchAdtNode ((UINT8 *)DtbPa, mDeviceTreeSize, 0, mLoadBase, MemSize);
+        PatchAdtNode ((UINT8 *)DtbPa, mDeviceTreeSize, 0,
+                      mLoadBase, MemSize, RamdiskPa, mRamdiskSize);
         if (mAdtPatched != 3) {
             Print (L"Xnuload: ADT dram-base/dram-size props missing (0x%x)\n",
                    mAdtPatched);
             return EFI_LOAD_ERROR;
         }
+        if (mRamdiskSize != 0 && (mAdtPatched & 4) == 0) {
+            Print (L"Xnuload: Ram disk given but ADT has no RAMDisk property\n");
+            return EFI_LOAD_ERROR;
+        }
         Print (L"[Xnuload] ADT dram-base/dram-size rewritten to 0x%Lx/0x%Lx\n",
                mLoadBase, MemSize);
+        if (mRamdiskSize != 0) {
+            Print (L"[Xnuload] ADT RAMDisk rewritten to 0x%Lx/0x%Lx\n",
+                   RamdiskPa, mRamdiskSize);
+        }
     }
     ArgsPa = (DtbPa + mDeviceTreeSize + 0x3FFFULL) & ~0x3FFFULL;
     Args   = (boot_args *)ArgsPa;
@@ -1165,6 +1206,9 @@ UefiMain (
     FetchGopFramebuffer (Args);
     Args->Video.v_display = 1;
     AsciiStrCpyS (Args->CommandLine, BOOT_LINE_LENGTH, BOOTARG_STRING);
+    if (mRamdiskSize != 0) {
+        AsciiStrCatS (Args->CommandLine, BOOT_LINE_LENGTH, " rd=md0");
+    }
 
     EntryPa = mLoadBase + (mEntryVa - mKernelLinkBase);
 
@@ -1221,7 +1265,8 @@ UefiMain (
 
     /* Hand off to the kernel with x0 = boot args PA. No EFI calls from here
      * on (not even Print): the console may already be torn down. */
-    Handoff (ArgsPa, EntryPa, mLoadBase, mLoadBase + KernelLoadSize + XNU_HEADROOM);
+    Handoff (ArgsPa, EntryPa, mLoadBase,
+             mLoadBase + KernelLoadSize + RamdiskLoadSize + XNU_HEADROOM);
 
     /* Unreachable. */
     return EFI_NOT_READY;

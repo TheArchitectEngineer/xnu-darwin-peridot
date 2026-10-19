@@ -72,10 +72,17 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None):
+def build(seed=None, ramdisk=False):
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
+
+    # /chosen/memory-map: IOFindBSDRoot turns a RAMDisk property into md0
+    # (boot with rd=md0).  The loader rewrites the <phys, size> pair before
+    # handoff (like dram-base/dram-size); the placeholder keeps the property
+    # present in the tree so the loader has somewhere to write.
+    memory_map = node('memory-map', [ph()] +
+                      ([('RAMDisk', u64(0, 0))] if ramdisk else []))
 
     chosen = node('chosen', [
         ph(),
@@ -105,7 +112,7 @@ def build(seed=None):
         ('effective-production-status-ap', u32(0)),
         ('certificate-security-mode', u32(1)),
         ('effective-security-mode-sep', u32(1)),
-    ], [node('memory-map', [ph()]),
+    ], [memory_map,
         # SIP relaxed like `csrutil disable` (lp-sip0) + unauthenticated root
         # (lp-sip1): the iOS shared cache is in no trust cache.
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
@@ -216,7 +223,7 @@ def build(seed=None):
 
 
 if __name__ == '__main__':
-    root = build()
+    root = build(ramdisk='--ramdisk' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
