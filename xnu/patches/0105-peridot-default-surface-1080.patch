@@ -1,0 +1,33 @@
+--- a/iokit/Kernel/arm/PeridotFramebuffer.cpp	2026-10-20 18:14:40.533967311 +0700
++++ b/iokit/Kernel/arm/PeridotFramebuffer.cpp	2026-10-20 18:14:40.555301502 +0700
+@@ -179,7 +179,18 @@
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+-	fSurface = peridot_surface_create_physical(fPhys, fLogicalW, fLogicalH, fRowBytes, PERIDOT_FB_FORMAT_BGRA);
++	int def = 0;
++	PE_parse_boot_argn("peridotfb_default", &def, sizeof(def));
++	uint32_t surfaceW = fLogicalW;
++	uint32_t surfaceH = fLogicalH;
++	if (!native && def == 1080) {
++		surfaceW = 1080;
++		surfaceH = 2400;
++	} else if (!native && def == 1220) {
++		surfaceW = fWidth;
++		surfaceH = fHeight;
++	}
++	fSurface = peridot_surface_create_physical(fPhys, surfaceW, surfaceH, fRowBytes, PERIDOT_FB_FORMAT_BGRA);
+ 	fPanelSurface = peridot_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, PERIDOT_FB_FORMAT_BGRA);
+ 	fPixels = fPanelSurface != NULL ? fPanelSurface->kernelAddress() : 0;
+ 	fWorkLoop = IOWorkLoop::workLoop();
+@@ -205,8 +216,8 @@
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
+-	IOLog("PERIDOT FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+-	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	IOLog("PERIDOT FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u %ux%u, presented as %ux%u\n",
++	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, surfaceW, surfaceH, fLogicalW, fLogicalH);
+ 	return true;
+ }
+ 
