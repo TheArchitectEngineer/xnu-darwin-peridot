@@ -1,0 +1,138 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -26,10 +26,9 @@
+ #define TOUCH_SE_PA      0x00a84000u
+ #define TOUCH_GCC_PA     0x00100000u
+ #define TOUCH_NORTH_PA   0x03900000u /* DT TLMM + NORTH (0x500000) */
+-#define TOUCH_GCC_VOTE   0x5200cu
+-#define TOUCH_RCG       0x18148u    /* wrapper1 LOCAL S1 = global SE7 */
+-#define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)
+-#define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)
++/* One 4 KiB page per GCC block; a large mapping exhausts the kernel map. */
++#define TOUCH_GCC_VOTE   0x0000000cu
++#define TOUCH_RCG        0x00000148u    /* wrapper1 LOCAL S1 = global SE7 */
+ #define TOUCH_MAX        10u
+ #define TOUCH_GOODIX     1
+ #define TOUCH_FTS        2
+@@ -61,7 +60,8 @@
+                          (1u << 27) | (1u << 30))
+ 
+ static struct {
+-	vm_offset_t se, gcc, gpio;
++	vm_offset_t se, gcc, gcc_vote;
++	vm_offset_t gpio6, gpio7, gpio8, gpio9, gpio90;
+ 	bool started, dead;
+ 	int kind, irq_hint;
+ 	uint32_t irq_status, active;
+@@ -106,19 +106,35 @@
+ 	return false;
+ }
+ 
++static vm_offset_t
++touch_gpio_base(unsigned pin)
++{
++	switch (pin) {
++	case 6: return st.gpio6;
++	case 7: return st.gpio7;
++	case 8: return st.gpio8;
++	case 9: return st.gpio9;
++	case 90: return st.gpio90;
++	default: return 0;
++	}
++}
++
+ static void
+ touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
+ {
+-	uint32_t off = TOUCH_GPIO_CFG(pin);
+-	uint32_t cfg = touch_rd(st.gpio, off);
++	vm_offset_t base = touch_gpio_base(pin);
++	uint32_t cfg;
++	if (!base) {
++		return;
++	}
++	cfg = touch_rd(base, 0);
+ 	if (out) {
+ 		/* Set the desired latch before enabling output (reset is active low). */
+-		touch_wr(st.gpio, TOUCH_GPIO_IO(pin),
+-		    (touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
++		touch_wr(base, 4, (touch_rd(base, 4) & ~2u) | (high ? 2u : 0u));
+ 	}
+ 	cfg &= ~0x3ffu;
+ 	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
+-	touch_wr(st.gpio, off, cfg);
++	touch_wr(base, 0, cfg);
+ }
+ 
+ static bool
+@@ -126,11 +142,12 @@
+ {
+ 	/* Vote on only wrapper1 and SE7, preserving other clock users. */
+ 	uint32_t mask = (0x0fu << 18) | (1u << 23);
+-	touch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);
++	touch_wr(st.gcc_vote, TOUCH_GCC_VOTE,
++	    touch_rd(st.gcc_vote, TOUCH_GCC_VOTE) | mask);
+ 	uint32_t dfs = touch_rd(st.gcc, TOUCH_RCG + 0x14u);
+ 	uint32_t cfg = touch_rd(st.gcc, TOUCH_RCG + 4u);
+ 	printf("PERIDOT TOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n",
+-	    touch_rd(st.gcc, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG), cfg, dfs);
++	    touch_rd(st.gcc_vote, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG), cfg, dfs);
+ 	if (dfs & 1u) {
+ 		/* SE CLK_SEL=0 selects DFS performance level 0. Do not alter tables. */
+ 		cfg = touch_rd(st.gcc, TOUCH_RCG + 0x1cu);
+@@ -148,7 +165,7 @@
+ 			return false;
+ 		}
+ 	}
+-	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
++	const uint32_t branches[] = {0x004, 0x008, 0x00c, 0x010, 0x144};
+ 	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
+ 		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
+ 			printf("PERIDOT TOUCH: GCC branch %#x halted (%#x)\n", branches[i],
+@@ -480,21 +497,30 @@
+ 	 */
+ 	(void)PE_parse_boot_argn("peridottouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("PERIDOT TOUCH: starting in %u s\n", delay_s);
+-	touch_wait(delay_s * 1000u);
++	/*
++	 * Map the few register pages we use before userland eats the kernel map.
++	 * A single 0x60000 mapping panics in kmem_alloc once backboardd is up.
++	 */
+ 	printf("PERIDOT TOUCH: mapping GCC/TLMM/SE7\n");
+-	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+-	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
+-	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
+-	if (!st.gcc || !st.gpio || !st.se) {
++	st.gcc = ml_io_map(TOUCH_GCC_PA + 0x18000, 0x1000);
++	st.gcc_vote = ml_io_map(TOUCH_GCC_PA + 0x52000, 0x1000);
++	st.se = ml_io_map(TOUCH_SE_PA, 0x1000);
++	st.gpio6 = ml_io_map(TOUCH_NORTH_PA + 6u * 0x1000u, 0x1000);
++	st.gpio7 = ml_io_map(TOUCH_NORTH_PA + 7u * 0x1000u, 0x1000);
++	st.gpio8 = ml_io_map(TOUCH_NORTH_PA + 8u * 0x1000u, 0x1000);
++	st.gpio9 = ml_io_map(TOUCH_NORTH_PA + 9u * 0x1000u, 0x1000);
++	st.gpio90 = ml_io_map(TOUCH_NORTH_PA + 90u * 0x1000u, 0x1000);
++	if (!st.gcc || !st.gcc_vote || !st.se || !st.gpio6 || !st.gpio7 ||
++	    !st.gpio8 || !st.gpio9 || !st.gpio90) {
+ 		printf("PERIDOT TOUCH: MMIO mapping failed\n");
+ 		goto out;
+ 	}
++	touch_wait(delay_s * 1000u);
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
+ 	printf("PERIDOT TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
++	    touch_rd(st.gpio8, 4), touch_rd(st.gpio9, 4), touch_rd(st.gpio90, 4));
+ 	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+ 	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+ 	touch_gpio(8, 0, 3, 3, true, false);
+@@ -533,7 +559,7 @@
+ 	unsigned errors = 0, ticks = 0;
+ 	while (!st.dead) {
+ 		/* Optional IRQ hint still reads every 100ms, and always while down. */
+-		if (!st.irq_hint || st.active || !(touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u) ||
++		if (!st.irq_hint || st.active || !(touch_rd(st.gpio9, 4) & 1u) ||
+ 		    (++ticks % 10u) == 0) {
+ 			int err = st.kind == TOUCH_GOODIX ? touch_goodix() : touch_focaltech();
+ 			if (err) {
