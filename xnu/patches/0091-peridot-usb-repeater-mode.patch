@@ -1,0 +1,34 @@
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -239,18 +239,12 @@
+ 	{
+ 		uint8_t mode = 0, hiz = 0;
+ 
+-		if (rptr_rd(0x40, &mode) == 0) {
++		/* MODE_CTL/HIZ report the eUSB2 role negotiation; the
++		 * downstream driver only reads them, it never writes them. */
++		if (rptr_rd(0x40, &mode) == 0)
+ 			printf("PERIDOT USB: repeater mode 0x%02x\n", mode);
+-			/* Device mode: PERIPH_SEL, clear HOST_SEL. */
+-			(void)rptr_wr(0x40, (mode & ~0x02u) | 0x01u);
+-		}
+-		if (rptr_rd(0x41, &hiz) == 0) {
++		if (rptr_rd(0x41, &hiz) == 0)
+ 			printf("PERIDOT USB: repeater hiz 0x%02x\n", hiz);
+-			if (hiz & 0x80) {
+-				(void)rptr_wr(0x41, hiz & ~0x80u);
+-				printf("PERIDOT USB: repeater hiz cleared\n");
+-			}
+-		}
+ 	}
+ 	/* Bring out of reset (RPTR_EN) before the tuning writes. */
+ 	if (rptr_rd(RPTR_EN_CTL1, &value) != 0) {
+@@ -260,6 +254,8 @@
+ 		printf("PERIDOT USB: repeater RPTR_EN failed\n");
+ 		return;
+ 	}
++	if (rptr_rd(0x40, &value) == 0)
++		printf("PERIDOT USB: repeater mode after reset 0x%02x\n", value);
+ 	for (i = 0; i < sizeof(tune) / sizeof(tune[0]); i++) {
+ 		if (rptr_wr(tune[i][1], tune[i][0]) != 0) {
+ 			printf("PERIDOT USB: repeater tune 0x%02x failed\n",
