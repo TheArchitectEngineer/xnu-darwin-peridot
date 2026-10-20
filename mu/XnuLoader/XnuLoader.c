@@ -74,6 +74,9 @@
 #define XNUFDT01_MAGIC          0x3130544446554E58ULL  /* "XNUFDT01" */
 #define XNUROOT1_MAGIC          0x31544F4F52554E58ULL  /* "XNUROOT1" */
 
+#define XNU_LOG_STALL_US        20000
+#define XNU_PRINT(...)          do { Print (__VA_ARGS__); if (gBS != NULL) { gBS->Stall (XNU_LOG_STALL_US); } } while (0)
+
 #define MH_MAGIC_64             0xfeedfacfU
 #define CPU_TYPE_ARM64          0x0100000cU
 #define MH_EXECUTE              2U
@@ -111,7 +114,7 @@
 /* Base command line; " rd=md0" is appended when a ram disk is present.
  * peridotusb=2 starts the USB device-mode gadget (ECM) once the kernel is up;
  * cpus=6 keeps the six A55 cores; the A76 pair is not proven stable. */
-#define BOOTARG_STRING          "-v -noprogress keepsyms=1 debug=0x14e serial=3 peridotusb=2 cpus=6 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 wdt=-1 peridotfb_hz=30 peridotfb_force_on=1 peridotfb_noconsole=1 peridotfb_default=1080 peridotscan=backboardd,SpringBoard,bluetoothd,fairplayd.H2,xpcproxy peridotsample=-"
+#define BOOTARG_STRING          "-v -noprogress keepsyms=1 debug=0x14e serial=3 peridotusb=2 cpus=6 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 wdt=-1 peridotfb_hz=30 peridotfb_force_on=1 peridotfb_noconsole=1 peridotfb_default=1080 peridotlogpace=30000 peridotscan=backboardd,SpringBoard,bluetoothd,fairplayd.H2,xpcproxy peridotsample=-"
 
 #define BOOT_LINE_LENGTH        608
 #define MAX_SEGMENTS            32
@@ -332,16 +335,16 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
     BOOLEAN         SeenText = FALSE;
 
     if (Header->magic != MH_MAGIC_64) {
-        Print (L"Xnuload: Kernel has unexpected magic 0x%x (want 0x%8x)\n",
+        XNU_PRINT (L"Xnuload: Kernel has unexpected magic 0x%x (want 0x%8x)\n",
                Header->magic, (UINT32)MH_MAGIC_64);
         return EFI_LOAD_ERROR;
     }
     if (Header->cputype != CPU_TYPE_ARM64) {
-        Print (L"Xnuload: Kernel is not arm64 (cputype 0x%x)\n", Header->cputype);
+        XNU_PRINT (L"Xnuload: Kernel is not arm64 (cputype 0x%x)\n", Header->cputype);
         return EFI_LOAD_ERROR;
     }
     if (Header->filetype != MH_EXECUTE) {
-        Print (L"Xnuload: Kernel is not MH_EXECUTE (0x%x)\n", Header->filetype);
+        XNU_PRINT (L"Xnuload: Kernel is not MH_EXECUTE (0x%x)\n", Header->filetype);
         return EFI_LOAD_ERROR;
     }
 
@@ -351,7 +354,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
 
         if (Cmd->cmdsize < sizeof (load_command) ||
             (UINTN)CmdPtr + Cmd->cmdsize > (UINTN)mKernelPtr + mKernelSize) {
-            Print (L"Xnuload: Load command overflow\n");
+            XNU_PRINT (L"Xnuload: Load command overflow\n");
             return EFI_LOAD_ERROR;
         }
 
@@ -361,7 +364,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 UINT64 SegEnd;
 
                 if (mSegCount >= MAX_SEGMENTS) {
-                    Print (L"Xnuload: Too many segments (%u)\n", mSegCount);
+                    XNU_PRINT (L"Xnuload: Too many segments (%u)\n", mSegCount);
                     return EFI_LOAD_ERROR;
                 }
                 if (!SeenText) {
@@ -372,7 +375,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                     mKernelLinkBase = Seg->vmaddr;
                     if ((mKernelLinkBase & 0xFFF) != 0 ||
                         mKernelLinkBase > 0xFFFFFFFF00000000ULL) {
-                        Print (L"Xnuload: Bogus kernel link base 0x%Lx\n",
+                        XNU_PRINT (L"Xnuload: Bogus kernel link base 0x%Lx\n",
                                mKernelLinkBase);
                         return EFI_LOAD_ERROR;
                     }
@@ -393,7 +396,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                     break;
                 }
                 if (Seg->vmaddr < mKernelLinkBase) {
-                    Print (L"Xnuload: Segment below link base (0x%Lx < 0x%Lx)\n",
+                    XNU_PRINT (L"Xnuload: Segment below link base (0x%Lx < 0x%Lx)\n",
                            Seg->vmaddr, mKernelLinkBase);
                     return EFI_LOAD_ERROR;
                 }
@@ -401,7 +404,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 SegEnd = Seg->vmaddr + Seg->vmsize - mKernelLinkBase;
 
                 if (SegEnd > SIZE_128MB) {
-                    Print (L"Xnuload: Segment image too large (0x%Lx)\n", SegEnd);
+                    XNU_PRINT (L"Xnuload: Segment image too large (0x%Lx)\n", SegEnd);
                     return EFI_LOAD_ERROR;
                 }
                 if (SegEnd > mLoadEnd) {
@@ -424,13 +427,13 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 UINT32 Flavor;
 
                 if (Cmd->cmdsize < 16 + ARM_THREAD_STATE64_PC_OFF + 8) {
-                    Print (L"Xnuload: LC_UNIXTHREAD too small (%u)\n",
+                    XNU_PRINT (L"Xnuload: LC_UNIXTHREAD too small (%u)\n",
                            Cmd->cmdsize);
                     return EFI_LOAD_ERROR;
                 }
                 Flavor = *(UINT32 *)(CmdPtr + 8);
                 if (Flavor != ARM_THREAD_STATE64) {
-                    Print (L"Xnuload: LC_UNIXTHREAD flavor %u unsupported\n",
+                    XNU_PRINT (L"Xnuload: LC_UNIXTHREAD flavor %u unsupported\n",
                            Flavor);
                     return EFI_UNSUPPORTED;
                 }
@@ -460,7 +463,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
                 }
                 if (Dyld->bind_size != 0 || Dyld->weak_bind_size != 0 ||
                     Dyld->lazy_bind_size != 0) {
-                    Print (L"Xnuload: Kernel has binds (unsupported)\n");
+                    XNU_PRINT (L"Xnuload: Kernel has binds (unsupported)\n");
                     return EFI_UNSUPPORTED;
                 }
                 break;
@@ -474,11 +477,11 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
     }
 
     if (mSegCount == 0) {
-        Print (L"Xnuload: No segments found\n");
+        XNU_PRINT (L"Xnuload: No segments found\n");
         return EFI_LOAD_ERROR;
     }
     if (mLoadEnd == 0) {
-        Print (L"Xnuload: Kernel image is empty\n");
+        XNU_PRINT (L"Xnuload: Kernel image is empty\n");
         return EFI_LOAD_ERROR;
     }
 
@@ -486,12 +489,12 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
         mEntryVa = mKernelLinkBase + mEntryFileOff;
     }
     if (mEntryVa == 0) {
-        Print (L"Xnuload: No entry point found\n");
+        XNU_PRINT (L"Xnuload: No entry point found\n");
         return EFI_LOAD_ERROR;
     }
     if (mEntryVa < mKernelLinkBase ||
         mEntryVa - mKernelLinkBase >= mLoadEnd) {
-        Print (L"Xnuload: Entry 0x%Lx outside loaded image\n", mEntryVa);
+        XNU_PRINT (L"Xnuload: Entry 0x%Lx outside loaded image\n", mEntryVa);
         return EFI_LOAD_ERROR;
     }
 
@@ -500,7 +503,7 @@ STATIC EFI_STATUS ScanKernelImage (VOID)
     if (mKernelLinkBase == 0) {
         mKvaBase = XNU_KVA_BASE;
         if (mRebaseOff == 0 || mRebaseSize == 0) {
-            Print (L"Xnuload: 0-based kernel lacks a rebasable LC_DYLD_INFO stream\n");
+            XNU_PRINT (L"Xnuload: 0-based kernel lacks a rebasable LC_DYLD_INFO stream\n");
             return EFI_LOAD_ERROR;
         }
     } else {
@@ -580,12 +583,12 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
 
     Status = CaptureMemoryMap (&Map, &MapSize, &DescSize);
     if (EFI_ERROR (Status)) {
-        Print (L"Xnuload: GetMemoryMap for load-base selection failed: %r\n", Status);
+        XNU_PRINT (L"Xnuload: GetMemoryMap for load-base selection failed: %r\n", Status);
         return Status;
     }
 
     /* Diagnostics first: where the payload lives and what UEFI offers. */
-    Print (L"[Xnuload] payload tail [0x%Lx, 0x%Lx)\n", mTailStart, mTailEnd);
+    XNU_PRINT (L"[Xnuload] payload tail [0x%Lx, 0x%Lx)\n", mTailStart, mTailEnd);
     for (Offset = 0; Offset < MapSize && DescSize != 0; Offset += DescSize) {
         EFI_MEMORY_DESCRIPTOR *D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
         UINT64 DStart;
@@ -597,7 +600,7 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
         DStart = D->PhysicalStart;
         DEnd   = D->PhysicalStart + D->NumberOfPages * SIZE_4KB;
         if (DEnd - DStart >= SIZE_16MB) {
-            Print (L"[Xnuload] free [0x%Lx, 0x%Lx) span 0x%Lx\n",
+            XNU_PRINT (L"[Xnuload] free [0x%Lx, 0x%Lx) span 0x%Lx\n",
                    DStart, DEnd, DEnd - DStart);
         }
     }
@@ -677,7 +680,7 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
             }
             Cand[Pos].Base = Base;
             Cand[Pos].Span = Span;
-            Print (L"[Xnuload] candidate [0x%Lx, 0x%Lx) span 0x%Lx\n",
+            XNU_PRINT (L"[Xnuload] candidate [0x%Lx, 0x%Lx) span 0x%Lx\n",
                    Base, End, Span);
         }
     }
@@ -688,14 +691,14 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
         Status = gBS->AllocatePages (
             AllocateAddress, EfiBootServicesData, Pages, &Base);
         if (EFI_ERROR (Status)) {
-            Print (L"Xnuload: candidate 0x%Lx failed: %r\n", Cand[i].Base, Status);
+            XNU_PRINT (L"Xnuload: candidate 0x%Lx failed: %r\n", Cand[i].Base, Status);
             continue;
         }
 
         /* Defense in depth: never place the kernel over the payload. */
         if (mTailEnd != 0 &&
             Base < mTailEnd && Base + Pages * SIZE_4KB > mTailStart) {
-            Print (L"[Xnuload] BUG: 0x%Lx overlaps payload, freeing\n",
+            XNU_PRINT (L"[Xnuload] BUG: 0x%Lx overlaps payload, freeing\n",
                    (UINT64)Base);
             gBS->FreePages (Base, Pages);
             continue;
@@ -704,7 +707,7 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
         mLoadBase = Cand[i].Base;
         mLoadSpan = Cand[i].Span;
         gBS->FreePool (Map);
-        Print (L"[Xnuload] Reserved %Lu pages @ 0x%Lx (span 0x%Lx)\n",
+        XNU_PRINT (L"[Xnuload] Reserved %Lu pages @ 0x%Lx (span 0x%Lx)\n",
                (UINT64)Pages, mLoadBase, mLoadSpan);
         return EFI_SUCCESS;
     }
@@ -719,13 +722,13 @@ STATIC EFI_STATUS ReserveKernelRegion (UINT64 ReserveSize)
         }
         Span = D->NumberOfPages * SIZE_4KB;
         if (Span >= SIZE_16MB) {
-            Print (L"Xnuload: free [0x%Lx, 0x%Lx) span 0x%Lx\n",
+            XNU_PRINT (L"Xnuload: free [0x%Lx, 0x%Lx) span 0x%Lx\n",
                    D->PhysicalStart, D->PhysicalStart + Span, Span);
         }
     }
 
     gBS->FreePool (Map);
-    Print (L"Xnuload: no conventional region fits the kernel (need 0x%Lx, tail [0x%Lx, 0x%Lx))\n",
+    XNU_PRINT (L"Xnuload: no conventional region fits the kernel (need 0x%Lx, tail [0x%Lx, 0x%Lx))\n",
            ReserveSize, mTailStart, mTailEnd);
     return EFI_NOT_FOUND;
 }
@@ -749,7 +752,7 @@ STATIC EFI_STATUS LoadKernelImage (VOID)
 
         if (mSegFileOff[SegIdx] > mKernelSize ||
             mSegFileOff[SegIdx] + mSegFileSize[SegIdx] > mKernelSize) {
-            Print (L"Xnuload: Segment %Lu file data out of range\n", (UINT64)SegIdx);
+            XNU_PRINT (L"Xnuload: Segment %Lu file data out of range\n", (UINT64)SegIdx);
             return EFI_LOAD_ERROR;
         }
 
@@ -802,7 +805,7 @@ STATIC EFI_STATUS ApplyRebases (VOID)
         if (Hi == RP_SET_TYPE_IMM) {
             CurType = Imm;
             if (CurType != REBASE_TYPE_POINTER) {
-                Print (L"Xnuload: Unsupported rebase type %u\n", CurType);
+                XNU_PRINT (L"Xnuload: Unsupported rebase type %u\n", CurType);
                 return EFI_UNSUPPORTED;
             }
         } else if (Hi == RP_SET_SEG_OFF_ULEB) {
@@ -810,7 +813,7 @@ STATIC EFI_STATUS ApplyRebases (VOID)
              * followed by one ULEB offset. */
             UINT32 SegIdx = Imm;
             if (SegIdx >= mSegCount) {
-                Print (L"Xnuload: Rebase references segment %u (only %u)\n",
+                XNU_PRINT (L"Xnuload: Rebase references segment %u (only %u)\n",
                        SegIdx, mSegCount);
                 return EFI_LOAD_ERROR;
             }
@@ -854,12 +857,12 @@ STATIC EFI_STATUS ApplyRebases (VOID)
                 Slots++;
             }
         } else {
-            Print (L"Xnuload: Unsupported rebase opcode 0x%x\n", (UINT32)Op);
+            XNU_PRINT (L"Xnuload: Unsupported rebase opcode 0x%x\n", (UINT32)Op);
             return EFI_UNSUPPORTED;
         }
     }
 
-    Print (L"[Xnuload] Rebase fixups applied: %Lu slots (slide 0x%Lx)\n", Slots, Slide);
+    XNU_PRINT (L"[Xnuload] Rebase fixups applied: %Lu slots (slide 0x%Lx)\n", Slots, Slide);
     return EFI_SUCCESS;
 }
 
@@ -875,7 +878,7 @@ STATIC BOOLEAN FetchGopFramebuffer (boot_args *Args)
 
     if (EFI_ERROR (Status) || Gop == NULL || Gop->Mode == NULL ||
         Gop->Mode->Info == NULL) {
-        Print (L"Xnuload: GOP unavailable, no framebuffer info\n");
+        XNU_PRINT (L"Xnuload: GOP unavailable, no framebuffer info\n");
         return FALSE;
     }
 
@@ -1076,46 +1079,46 @@ UefiMain (
     UINTN                  Attempt;
     UINT64                 CurrentEl;
 
-    Print (L"[Xnuload] Darwin/XNU loader v9 (Mu-Silicium UEFI, peridot)\n");
+    XNU_PRINT (L"[Xnuload] Darwin/XNU loader v9 (Mu-Silicium UEFI, peridot)\n");
 
     __asm__ __volatile__ ("mrs %0, CurrentEL" : "=r" (CurrentEl));
-    Print (L"[Xnuload] CurrentEL 0x%Lx\n", CurrentEl);
+    XNU_PRINT (L"[Xnuload] CurrentEL 0x%Lx\n", CurrentEl);
 
     /* Boot shim tail pointer. */
     TailAddr = *(UINT64 *)BOOTSHIM_TAIL_PTR_ADDR;
     if (TailAddr == 0 || (TailAddr & 0x7) != 0) {
-        Print (L"[Xnuload] BootShim tail pointer invalid (0x%Lx)\n", TailAddr);
+        XNU_PRINT (L"[Xnuload] BootShim tail pointer invalid (0x%Lx)\n", TailAddr);
         return EFI_NOT_FOUND;
     }
 
     Status = ParseTailBlocks (TailAddr);
     if (EFI_ERROR (Status)) {
-        Print (L"[Xnuload] Failed to find XNU payload at 0x%Lx\n", TailAddr);
+        XNU_PRINT (L"[Xnuload] Failed to find XNU payload at 0x%Lx\n", TailAddr);
         return Status;
     }
 
     Status = ScanKernelImage ();
     if (EFI_ERROR (Status)) {
-        Print (L"[Xnuload] Mach-O scan failed: %r\n", Status);
+        XNU_PRINT (L"[Xnuload] Mach-O scan failed: %r\n", Status);
         return Status;
     }
 
-    Print (L"[Xnuload] Kernel 0x%Lx bytes @ 0x%Lx, DT 0x%Lx bytes @ 0x%Lx\n",
+    XNU_PRINT (L"[Xnuload] Kernel 0x%Lx bytes @ 0x%Lx, DT 0x%Lx bytes @ 0x%Lx\n",
            mKernelSize, mKernelPtr, mDeviceTreeSize, mDeviceTree);
-    Print (L"[Xnuload] link base 0x%Lx, entry VA 0x%Lx, KVA base 0x%Lx (slide 0x%Lx)\n",
+    XNU_PRINT (L"[Xnuload] link base 0x%Lx, entry VA 0x%Lx, KVA base 0x%Lx (slide 0x%Lx)\n",
            mKernelLinkBase, mEntryVa, mKvaBase, mSlide);
     if (mRebaseSize != 0) {
-        Print (L"[Xnuload] Rebase stream @ +0x%Lx size 0x%Lx\n",
+        XNU_PRINT (L"[Xnuload] Rebase stream @ +0x%Lx size 0x%Lx\n",
                mRebaseOff, mRebaseSize);
     }
     if (mRamdiskSize != 0) {
-        Print (L"[Xnuload] Ram disk 0x%Lx bytes @ 0x%Lx\n",
+        XNU_PRINT (L"[Xnuload] Ram disk 0x%Lx bytes @ 0x%Lx\n",
                mRamdiskSize, mRamdiskPtr);
     }
 
     KernelLoadSize = (mLoadEnd + 0x1FFFFULL) & ~0x1FFFFULL;   /* 128KB align */
     if (KernelLoadSize == 0 || KernelLoadSize > SIZE_128MB) {
-        Print (L"[Xnuload] Load size bogus (0x%Lx)\n", KernelLoadSize);
+        XNU_PRINT (L"[Xnuload] Load size bogus (0x%Lx)\n", KernelLoadSize);
         return EFI_LOAD_ERROR;
     }
     RamdiskLoadSize = (mRamdiskSize + 0x1FFFFULL) & ~0x1FFFFULL;
@@ -1130,7 +1133,7 @@ UefiMain (
     /* Copy the image (mach header lands at mLoadBase). */
     Status = LoadKernelImage ();
     if (EFI_ERROR (Status)) {
-        Print (L"[Xnuload] Segment load failed: %r\n", Status);
+        XNU_PRINT (L"[Xnuload] Segment load failed: %r\n", Status);
         return Status;
     }
 
@@ -1143,7 +1146,7 @@ UefiMain (
     /* Apply the rebases (this kernel needs it). */
     Status = ApplyRebases ();
     if (EFI_ERROR (Status)) {
-        Print (L"[Xnuload] Rebase failed: %r\n", Status);
+        XNU_PRINT (L"[Xnuload] Rebase failed: %r\n", Status);
         return Status;
     }
 
@@ -1151,7 +1154,7 @@ UefiMain (
      * come from the chosen conventional region, capped by XNU_MEM_SIZE_CAP. */
     UINT64 MemSize = MIN (XNU_MEM_SIZE_CAP, mLoadSpan);
     if (MemSize < ReserveSize) {
-        Print (L"[Xnuload] Chosen span 0x%Lx too small (need 0x%Lx)\n",
+        XNU_PRINT (L"[Xnuload] Chosen span 0x%Lx too small (need 0x%Lx)\n",
                MemSize, ReserveSize);
         return EFI_OUT_OF_RESOURCES;
     }
@@ -1170,18 +1173,18 @@ UefiMain (
         PatchAdtNode ((UINT8 *)DtbPa, mDeviceTreeSize, 0,
                       mLoadBase, MemSize, RamdiskPa, mRamdiskSize);
         if ((mAdtPatched & 3) != 3) {
-            Print (L"Xnuload: ADT dram-base/dram-size props missing (0x%x)\n",
+            XNU_PRINT (L"Xnuload: ADT dram-base/dram-size props missing (0x%x)\n",
                    mAdtPatched);
             return EFI_LOAD_ERROR;
         }
         if (mRamdiskSize != 0 && (mAdtPatched & 4) == 0) {
-            Print (L"Xnuload: Ram disk given but ADT has no RAMDisk property\n");
+            XNU_PRINT (L"Xnuload: Ram disk given but ADT has no RAMDisk property\n");
             return EFI_LOAD_ERROR;
         }
-        Print (L"[Xnuload] ADT dram-base/dram-size rewritten to 0x%Lx/0x%Lx\n",
+        XNU_PRINT (L"[Xnuload] ADT dram-base/dram-size rewritten to 0x%Lx/0x%Lx\n",
                mLoadBase, MemSize);
         if (mRamdiskSize != 0) {
-            Print (L"[Xnuload] ADT RAMDisk rewritten to 0x%Lx/0x%Lx\n",
+            XNU_PRINT (L"[Xnuload] ADT RAMDisk rewritten to 0x%Lx/0x%Lx\n",
                    RamdiskPa, mRamdiskSize);
         }
     }
@@ -1214,19 +1217,19 @@ UefiMain (
 
     EntryPa = mLoadBase + (mEntryVa - mKernelLinkBase);
 
-    Print (L"[Xnuload] physBase 0x%Lx, virtBase 0x%Lx, memSize 0x%Lx\n",
+    XNU_PRINT (L"[Xnuload] physBase 0x%Lx, virtBase 0x%Lx, memSize 0x%Lx\n",
            Args->physBase, Args->virtBase, Args->memSize);
-    Print (L"[Xnuload] FB@0x%Lx %ux%u row 0x%Lx\n",
+    XNU_PRINT (L"[Xnuload] FB@0x%Lx %ux%u row 0x%Lx\n",
            Args->Video.v_baseAddr, Args->Video.v_width, Args->Video.v_height,
            Args->Video.v_rowBytes);
-    Print (L"[Xnuload] DT pa 0x%Lx, DT va 0x%Lx, %u bytes\n",
+    XNU_PRINT (L"[Xnuload] DT pa 0x%Lx, DT va 0x%Lx, %u bytes\n",
            DtbPa, Args->deviceTreeP, Args->deviceTreeLength);
-    Print (L"[Xnuload] args pa 0x%Lx, topK 0x%Lx, entry 0x%Lx\n",
+    XNU_PRINT (L"[Xnuload] args pa 0x%Lx, topK 0x%Lx, entry 0x%Lx\n",
            ArgsPa, TopOfKernelData, EntryPa);
 
     /* All diagnostics must happen before ExitBootServices: the UEFI console
      * (and every other boot service) is gone after it succeeds. */
-    Print (L"[Xnuload] Handing off to the kernel at 0x%Lx with args @ 0x%Lx\n",
+    XNU_PRINT (L"[Xnuload] Handing off to the kernel at 0x%Lx with args @ 0x%Lx\n",
            EntryPa, ArgsPa);
 
     /* Get the memory map (ExitBootServices requires the key). */
@@ -1240,12 +1243,12 @@ UefiMain (
             MemoryMapSize += 128 * sizeof (EFI_MEMORY_DESCRIPTOR);
             MemoryMap = AllocatePool (MemoryMapSize);
             if (MemoryMap == NULL) {
-                Print (L"[Xnuload] Allocate pool for memory map failed\n");
+                XNU_PRINT (L"[Xnuload] Allocate pool for memory map failed\n");
                 return EFI_OUT_OF_RESOURCES;
             }
             continue;
         } else if (EFI_ERROR (Status)) {
-            Print (L"[Xnuload] GetMemoryMap failed: %r\n", Status);
+            XNU_PRINT (L"[Xnuload] GetMemoryMap failed: %r\n", Status);
             return Status;
         }
         break;
@@ -1261,7 +1264,7 @@ UefiMain (
                                &DescriptorSize, &MemDescVersion);
             continue;
         }
-        Print (L"[Xnuload] ExitBootServices failed: %r\n", Status);
+        XNU_PRINT (L"[Xnuload] ExitBootServices failed: %r\n", Status);
         return Status;
     }
 
