@@ -1,0 +1,49 @@
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -337,10 +337,17 @@
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+ 	if (enabled >= 2) {
+-		peridot_usb_repeater_on();
+-		peridot_usb_power_on(gcc);
+-		printf("PERIDOT USB: after power-on GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
+-		    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc704));
++		int reinit = 0;
++
++		PE_parse_boot_argn("peridotreinit", &reinit, sizeof(reinit));
++		if (reinit) {
++			peridot_usb_repeater_on();
++			peridot_usb_power_on(gcc);
++			printf("PERIDOT USB: reinitialized GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
++			    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc704));
++		} else {
++			printf("PERIDOT USB: reusing UEFI controller/PHY state\n");
++		}
+ 		peridot_usb_gadget_start(dwc);
+ 	}
+ 	if (cbcr[0] & CBCR_CLK_OFF) {
+@@ -1119,17 +1126,14 @@
+ 	ud.dma_pa = ptoa_64(pn);
+ 	ud_if_create();
+ 
+-	/* Device controller soft reset; keep halted and preserve the rest of DCTL. */
+-	dwc_wr(DCTL, (dwc_rd(DCTL) & ~DCTL_RUN_STOP) | DCTL_CSFTRST);
++	/* UEFI hands over a fully initialized device controller. Halting it
++	 * and replacing the event buffer is enough; a CSFTRST would discard
++	 * global state (FIFOs, GSBUSCFG) that is not rebuilt here. */
++	dwc_wr(DCTL, dwc_rd(DCTL) & ~DCTL_RUN_STOP);
++	delay(1000);
++	printf("PERIDOT USB: halted after handoff, GCTL 0x%08x DCFG 0x%08x\n",
++	    dwc_rd(GCTL), dwc_rd(DCFG));
+ 	int i;
+-	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+-		delay(1000);
+-	}
+-	printf("PERIDOT USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
+-	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
+-	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
+-		return;
+-	}
+ 
+ 	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
+ 	dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
