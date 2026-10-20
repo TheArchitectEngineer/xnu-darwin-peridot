@@ -1,0 +1,19 @@
+--- a/iokit/Kernel/arm/PeridotFramebuffer.cpp
++++ b/iokit/Kernel/arm/PeridotFramebuffer.cpp
+@@ -535,6 +535,16 @@
+ 	case kPeridotFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			int force_on = 0;
++			if (off && PE_parse_boot_argn("peridotfb_force_on", &force_on,
++			    sizeof(force_on)) && force_on != 0) {
++				static bool logged;
++				if (!logged) {
++					logged = true;
++					IOLog("PERIDOT FB: display off ignored\n");
++				}
++				off = false;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
