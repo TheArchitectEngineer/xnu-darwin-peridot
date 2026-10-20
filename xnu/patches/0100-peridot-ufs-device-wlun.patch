@@ -1,0 +1,21 @@
+--- a/bsd/dev/peridot_ufs.c
++++ b/bsd/dev/peridot_ufs.c
+@@ -59,7 +59,7 @@
+ #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
+ 
+ #define UFS_BLOCK       4096u
+-#define UFS_DEVICE_WLUN 0x50
++#define UFS_DEVICE_WLUN 0xD0
+ #define UFS_ACTIVE_PWR_MODE 1
+ #define BOUNCE_SIZE     (1u << 20)
+ #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+@@ -683,8 +683,8 @@
+ 	error = ufs_take_over_host();
+ 	if (!error) {
+ 		error = ufs_set_power_mode(UFS_DEVICE_WLUN, UFS_ACTIVE_PWR_MODE);
++		printf("PERIDOT UFS: SSU active on WLUN 0x%x: %d\n", UFS_DEVICE_WLUN, error);
+ 		if (error) {
+-			printf("PERIDOT UFS: active power mode failed %d\n", error);
+ 			error = 0;
+ 		}
+ 		delay(1000);
