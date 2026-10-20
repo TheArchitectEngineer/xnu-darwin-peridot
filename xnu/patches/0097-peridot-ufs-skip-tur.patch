@@ -1,0 +1,44 @@
+--- a/bsd/dev/peridot_ufs.c
++++ b/bsd/dev/peridot_ufs.c
+@@ -240,6 +240,12 @@
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("PERIDOT UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		printf("PERIDOT UFS: rsp %02x %02x %02x %02x %02x %02x %02x %02x"
++		    " %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    ucd->resp[0], ucd->resp[1], ucd->resp[2], ucd->resp[3],
++		    ucd->resp[4], ucd->resp[5], ucd->resp[6], ucd->resp[7],
++		    ucd->resp[8], ucd->resp[9], ucd->resp[10], ucd->resp[11],
++		    ucd->resp[12], ucd->resp[13], ucd->resp[14], ucd->resp[15]);
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -346,6 +352,8 @@
+ ufs_take_over_host(void)
+ {
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
++	printf("PERIDOT UFS: cap 0x%x hce 0x%x hcs 0x%x dma 0x%llx\n",
++	    ufs_rd(REG_CAP), hce, hcs, su.dma_pa);
+ 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+ 		printf("PERIDOT UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+ 		return ENXIO;
+@@ -614,8 +622,17 @@
+ 	error = ufs_take_over_host();
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+-		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++		int tur_error = 0;
++		for (int i = 0; i < 10; i++) {
++			tur_error = ufs_scsi(tur, sizeof(tur), 0, false);
++			if (!tur_error) {
++				break;
++			}
++			delay(10);
++		}
++		if (tur_error) {
++			printf("PERIDOT UFS: TUR failed %d, continuing to GPT\n", tur_error);
++			error = 0;
+ 		}
+ 	}
+ 	if (!error) {
