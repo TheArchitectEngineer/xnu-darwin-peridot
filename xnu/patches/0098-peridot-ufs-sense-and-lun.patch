@@ -1,0 +1,113 @@
+--- a/bsd/dev/peridot_ufs.c
++++ b/bsd/dev/peridot_ufs.c
+@@ -130,6 +130,17 @@
+ 	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
+ }
+ 
++static void
++ufs_log_sense(const uint8_t *s, unsigned len, const char *tag)
++{
++	if (len < 14) {
++		printf("PERIDOT UFS: %s: short sense %u\n", tag, len);
++		return;
++	}
++	printf("PERIDOT UFS: %s: sense %02x %02x key 0x%x asc 0x%x ascq 0x%x\n",
++	    tag, s[0], s[1], s[2] & 0x0f, s[12], s[13]);
++}
++
+ /*
+  * One SCSI command in slot 0, data (if any) to/from the bounce buffer
+  * (to the device when write is set). Returns 0 or an errno.
+@@ -241,16 +252,31 @@
+ 		printf("PERIDOT UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
+ 		printf("PERIDOT UFS: rsp %02x %02x %02x %02x %02x %02x %02x %02x"
++		    " %02x %02x %02x %02x %02x %02x %02x %02x"
++		    " %02x %02x %02x %02x %02x %02x %02x %02x"
+ 		    " %02x %02x %02x %02x %02x %02x %02x %02x\n",
+ 		    ucd->resp[0], ucd->resp[1], ucd->resp[2], ucd->resp[3],
+ 		    ucd->resp[4], ucd->resp[5], ucd->resp[6], ucd->resp[7],
+ 		    ucd->resp[8], ucd->resp[9], ucd->resp[10], ucd->resp[11],
+-		    ucd->resp[12], ucd->resp[13], ucd->resp[14], ucd->resp[15]);
++		    ucd->resp[12], ucd->resp[13], ucd->resp[14], ucd->resp[15],
++		    ucd->resp[16], ucd->resp[17], ucd->resp[18], ucd->resp[19],
++		    ucd->resp[20], ucd->resp[21], ucd->resp[22], ucd->resp[23],
++		    ucd->resp[24], ucd->resp[25], ucd->resp[26], ucd->resp[27],
++		    ucd->resp[28], ucd->resp[29], ucd->resp[30], ucd->resp[31]);
++		if (ucd->resp[7] == 0x02) {
++			uint16_t slen = (uint16_t)(ucd->resp[32] << 8 | ucd->resp[33]);
++			if (slen > 18) {
++				slen = 18;
++			}
++			ufs_log_sense(&ucd->resp[34], slen, "autosense");
++		}
+ 		return EIO;
+ 	}
+ 	return 0;
+ }
+ 
++static int ufs_request_sense(void);
++
+ /* READ(10) of count device blocks at lba into the bounce buffer. */
+ static int
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+@@ -263,7 +289,23 @@
+ 		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+ 		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+ 	};
+-	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
++	int error = ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
++	if (error) {
++		(void)ufs_request_sense();
++		error = ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
++	}
++	return error;
++}
++
++static int
++ufs_request_sense(void)
++{
++	static const uint8_t cdb[6] = { 0x03, 0, 0, 0, 18, 0 };
++	int error = ufs_scsi(cdb, sizeof(cdb), 18, false);
++	if (!error) {
++		ufs_log_sense((const uint8_t *)(su.dma + DMA_BOUNCE), 18, "request sense");
++	}
++	return error;
+ }
+ 
+ /*
+@@ -621,14 +663,16 @@
+ 	lck_mtx_lock(&peridot_ufs_lock);
+ 	error = ufs_take_over_host();
+ 	if (!error) {
++		(void)ufs_request_sense();
+ 		static const uint8_t tur[6] = { 0x00 };
+ 		int tur_error = 0;
+-		for (int i = 0; i < 10; i++) {
++		for (int i = 0; i < 3; i++) {
+ 			tur_error = ufs_scsi(tur, sizeof(tur), 0, false);
+ 			if (!tur_error) {
+ 				break;
+ 			}
+-			delay(10);
++			(void)ufs_request_sense();
++			delay(100);
+ 		}
+ 		if (tur_error) {
+ 			printf("PERIDOT UFS: TUR failed %d, continuing to GPT\n", tur_error);
+@@ -636,7 +680,14 @@
+ 		}
+ 	}
+ 	if (!error) {
+-		error = ufs_find_partition(want);
++		for (su.lun = 0; su.lun < 8; su.lun++) {
++			su.nblocks = 0;
++			(void)ufs_request_sense();
++			error = ufs_find_partition(want);
++			if (!error) {
++				break;
++			}
++		}
+ 	}
+ 	lck_mtx_unlock(&peridot_ufs_lock);
+ 	if (error) {
