@@ -109,8 +109,9 @@
 #define RP_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB  0x80
 
 /* Base command line; " rd=md0" is appended when a ram disk is present.
- * peridotusb=2 starts the USB device-mode gadget (ECM) once the kernel is up. */
-#define BOOTARG_STRING          "-v keepsyms=1 debug=0x14e serial=3 peridotusb=2"
+ * peridotusb=2 starts the USB device-mode gadget (ECM) once the kernel is up;
+ * cpus=8 opts in to all six A55 and two A76 cores. */
+#define BOOTARG_STRING          "-v keepsyms=1 debug=0x14e serial=3 peridotusb=2 cpus=8"
 
 #define BOOT_LINE_LENGTH        608
 #define MAX_SEGMENTS            32
