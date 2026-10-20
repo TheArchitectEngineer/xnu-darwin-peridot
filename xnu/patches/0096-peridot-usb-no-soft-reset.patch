@@ -1,0 +1,24 @@
+--- a/bsd/dev/peridot_usb.c
++++ b/bsd/dev/peridot_usb.c
+@@ -337,10 +337,10 @@
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+ 	if (enabled >= 2) {
+-		int reinit = 0;
++		int noinit = 0;
+ 
+-		PE_parse_boot_argn("peridotreinit", &reinit, sizeof(reinit));
+-		if (reinit) {
++		PE_parse_boot_argn("peridotnoinit", &noinit, sizeof(noinit));
++		if (!noinit) {
+ 			peridot_usb_repeater_on();
+ 			peridot_usb_power_on(gcc);
+ 			printf("PERIDOT USB: reinitialized GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x\n",
+@@ -1162,6 +1162,7 @@
+ 	dwc_wr(DEVTEN, 0x7);
+ 
+ 	/* Endpoint 0 OUT/IN: start config, control type, max packet 64 (HS). */
++	dwc_wr(DALEPENA, 0);
+ 	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
+ 	    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
+ 	    ud_epcmd(0, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
