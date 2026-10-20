@@ -110,8 +110,8 @@
 
 /* Base command line; " rd=md0" is appended when a ram disk is present.
  * peridotusb=2 starts the USB device-mode gadget (ECM) once the kernel is up;
- * cpus=8 opts in to all six A55 and two A76 cores. */
-#define BOOTARG_STRING          "-v keepsyms=1 debug=0x14e serial=3 peridotusb=2 cpus=8"
+ * cpus=6 keeps the six A55 cores; the A76 pair is not proven stable. */
+#define BOOTARG_STRING          "-v -noprogress keepsyms=1 debug=0x14e serial=3 peridotusb=2 cpus=6 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 launchd_unsecure_cache=1 wdt=-1 peridotfb_hz=30 peridotfb_force_on=1 peridotfb_noconsole=1 peridotscan=backboardd,SpringBoard,bluetoothd,fairplayd.H2,xpcproxy peridotsample=-"
 
 #define BOOT_LINE_LENGTH        608
 #define MAX_SEGMENTS            32
