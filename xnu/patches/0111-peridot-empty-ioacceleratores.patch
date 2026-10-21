@@ -1,0 +1,39 @@
+--- a/iokit/Kernel/arm/PeridotFramebuffer.cpp
++++ b/iokit/Kernel/arm/PeridotFramebuffer.cpp
+@@ -127,6 +127,18 @@
+ 	void present(const uint8_t *rec);
+ };
+ 
++/*
++ * The graphics accelerator's service class. QuartzCore (CAMetalContextCreate,
++ * once per process) polls IOServiceMatching("IOAcceleratorES") 300 times,
++ * 100 ms apart, before it goes on: thirty seconds at every backboardd start.
++ * One without MetalPluginName/MetalPluginClassName is found and then passed
++ * over by Metal (MTLRegisterDevices), which leaves the renderers as they were.
++ */
++class IOAcceleratorES : public IOService {
++	OSDeclareDefaultStructors(IOAcceleratorES);
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
+ class IOMobileFramebufferUserClient : public IOUserClient {
+@@ -218,6 +230,17 @@
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
++	uint32_t accelOn = 1;
++	(void)PE_parse_boot_argn("peridotaccel", &accelOn, sizeof(accelOn));
++	IOAcceleratorES *accel = accelOn ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	if (accel != NULL && accel->init()) {
++		accel->setName("sgx");
++		if (accel->attach(this)) {
++			accel->registerService();
++			IOLog("PERIDOT FB: empty IOAcceleratorES published (no 30 s wait in CAMetalContextCreate)\n");
++		}
++	}
++	OSSafeReleaseNULL(accel);
+ 	registerService();
+ 	IOLog("PERIDOT FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u %ux%u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, surfaceW, surfaceH, fLogicalW, fLogicalH);
