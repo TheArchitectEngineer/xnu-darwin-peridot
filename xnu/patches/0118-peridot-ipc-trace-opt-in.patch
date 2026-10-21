@@ -1,0 +1,35 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -91,6 +91,7 @@
+ #include <kern/syscall_subr.h>
+ #include <kern/policy_internal.h>
+ #include <kern/mach_filter.h>
++#include <pexpert/pexpert.h>
+ 
+ #include <vm/vm_map.h>
+ 
+@@ -169,7 +170,23 @@
+ static bool
+ peridot_ipc_trace_enabled(void)
+ {
+-	const char *name = proc_name_address(current_proc());
++	/*
++	 * The trace is loud enough to roll the console ring past the boot
++	 * milestones, so it is opt-in: pass peridotipc=1 on the command line.
++	 */
++	static int peridot_ipc_on = -1;
++	const char *name;
++
++	if (peridot_ipc_on < 0) {
++		int on = 0;
++		PE_parse_boot_argn("peridotipc", &on, sizeof(on));
++		peridot_ipc_on = (on != 0);
++	}
++	if (!peridot_ipc_on) {
++		return false;
++	}
++
++	name = proc_name_address(current_proc());
+ 	static const char * const traced[] = {
+ 		"SpringBoard", "mobileactivationd", "runningboardd", "backboardd",
+ 		"launchd", "lockdownd", "cfprefsd", "installd", "lsd"
