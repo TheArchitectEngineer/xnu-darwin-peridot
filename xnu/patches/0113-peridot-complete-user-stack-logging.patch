@@ -1,0 +1,47 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1014,28 +1014,27 @@
+ 	task_lock(task);
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+ 		arm_saved_state_t *ss = find_user_regs(thread);
+-		char line[400];
+-		int n;
++		int thread_index = tn++;
+ 		uint64_t fp;
+ 
+ 		if (ss == NULL || !is_saved_state64(ss)) {
+ 			continue;
+ 		}
+ 		fp = get_saved_state_fp(ss);
+-		n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, tn++,
++		printf("SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx\n", name, thread_index,
+ 		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss));
+-		for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0 && n < (int)sizeof(line) - 20; i++) {
++		for (int i = 0; i < 32 && fp != 0 && (fp & 7) == 0; i++) {
+ 			uint64_t frame[2];
+ 			if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++				printf("SMP %s t%d f%d unreadable\n", name, thread_index, i);
+ 				break;
+ 			}
+-			n += snprintf(line + n, sizeof(line) - n, " 0x%llx", frame[1]);
++			printf("SMP %s t%d f%d 0x%llx\n", name, thread_index, i, frame[1]);
+ 			if (frame[0] <= fp) {
+ 				break;
+ 			}
+ 			fp = frame[0];
+ 		}
+-		printf("%s\n", line);
+ 	}
+ 	task_unlock(task);
+ }
+--- a/bsd/dev/peridot_sample.c
++++ b/bsd/dev/peridot_sample.c
+@@ -65,7 +65,7 @@
+ {
+ 	static int chan;
+ 	if (!PE_parse_boot_argn("peridotsample", peridot_sample_names, sizeof(peridot_sample_names))) {
+-		strlcpy(peridot_sample_names, "SpringBoard,backboardd", sizeof(peridot_sample_names));
++		strlcpy(peridot_sample_names, "SpringBoard,backboardd,mobileactivationd,launchd,runningboardd,logd,lockdownd,installd,lsd", sizeof(peridot_sample_names));
+ 	}
+ 	if (peridot_sample_names[0] == '-') {
+ 		return;
