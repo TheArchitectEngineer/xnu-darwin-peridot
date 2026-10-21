@@ -1,0 +1,68 @@
+diff -ruN a/iokit/Kernel/arm/PeridotFramebuffer.cpp b/iokit/Kernel/arm/PeridotFramebuffer.cpp
+--- a/iokit/Kernel/arm/PeridotFramebuffer.cpp	2026-10-20 19:34:59.856295153 +0700
++++ b/iokit/Kernel/arm/PeridotFramebuffer.cpp	2026-10-20 19:35:32.622779998 +0700
+@@ -112,6 +112,7 @@
+ 	OSArray      *fClients;
+ 	uint32_t      fSwapID;
+ 	bool          fConsolePaused;
++	bool          fPanelCleared;
+ 	uint8_t       fPending[PERIDOT_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+@@ -193,6 +194,7 @@
+ 	fSurface = peridot_surface_create_physical(fPhys, surfaceW, surfaceH, fRowBytes, PERIDOT_FB_FORMAT_BGRA);
+ 	fPanelSurface = peridot_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, PERIDOT_FB_FORMAT_BGRA);
+ 	fPixels = fPanelSurface != NULL ? fPanelSurface->kernelAddress() : 0;
++	fPanelCleared = false;
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fSurface == NULL || fPanelSurface == NULL ||
+ 	    fPixels == 0 || fWorkLoop == NULL) {
+@@ -329,6 +331,11 @@
+ 	uint32_t mask = get32(rec, 0x104);
+ 
+ 
++	if (!fPanelCleared) {
++		fPanelCleared = true;
++		memset((void *)fPixels, 0, (size_t)fRowBytes * fHeight);
++	}
++
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+ 		fConsolePaused = true;
+diff -ruN a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c	2026-10-20 19:34:59.858199223 +0700
++++ b/osfmk/console/video_console.c	2026-10-20 19:36:01.467987631 +0700
+@@ -124,6 +124,10 @@
+ static boolean_t gc_enabled     = FALSE;
+ static boolean_t gc_initialized = FALSE;
+ static boolean_t vm_initialized = FALSE;
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++static int gc_clear_on_bottom = 1;
++static int gc_clear_on_bottom_parsed;
++#endif
+ 
+ static struct {
+ 	void (*initialize)(struct vc_info * info);
+@@ -887,6 +891,22 @@
+ 	case 0x0b:
+ 	case 0x0c:
+ 	case '\n':              /* Line feed		 */
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++		if (!gc_clear_on_bottom_parsed) {
++			gc_clear_on_bottom_parsed = 1;
++			PE_parse_boot_argn("peridotlogclear", &gc_clear_on_bottom,
++			    sizeof(gc_clear_on_bottom));
++		}
++		if (gc_clear_on_bottom != 0 && gc_y >= gc_scrreg_bottom - 1 &&
++		    gc_scrreg_top == 0 && gc_scrreg_bottom == vinfo.v_rows &&
++		    kernel_debugger_entry_count == 0 && !panic_active()) {
++			gc_clear_screen(0, 0, 0, vinfo.v_rows, 2);
++			gc_x = 0;
++			gc_y = 0;
++			gc_hanging_cursor = 0;
++			break;
++		}
++#endif
+ 		if (gc_y >= gc_scrreg_bottom - 1) {
+ 			gc_scroll_up(1, gc_scrreg_top, gc_scrreg_bottom);
+ 			gc_y = gc_scrreg_bottom - 1;
