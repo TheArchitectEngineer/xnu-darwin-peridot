@@ -1,0 +1,169 @@
+diff --git a/osfmk/ipc/mach_msg.c b/osfmk/ipc/mach_msg.c
+index 9771464..e994f9c 100644
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -158,6 +158,40 @@ static const vm_size_t ipc_kmsg_max_aux_data_space = 1024;
+ 
+ #define MACH_MSG_DESC_MIN_SIZE       sizeof(mach_msg_type_descriptor_t)
+ 
++extern char *proc_name_address(struct proc *p);
++
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++
++/*
++ * Bring-up trace for the IPC paths that can hold the SpringBoard launch.
++ * Log message metadata only: payloads can contain credentials and user data.
++ */
++static bool
++peridot_ipc_trace_enabled(void)
++{
++	const char *name = proc_name_address(current_proc());
++	static const char * const traced[] = {
++		"SpringBoard", "mobileactivationd", "runningboardd", "backboardd",
++		"launchd", "lockdownd", "cfprefsd", "installd", "lsd"
++	};
++
++	if (name == NULL) {
++		return false;
++	}
++	for (unsigned int i = 0; i < sizeof(traced) / sizeof(traced[0]); i++) {
++		const char *a = name, *b = traced[i];
++		while (*a != '\0' && *a == *b) {
++			a++;
++			b++;
++		}
++		if (*a == '\0' && *b == '\0') {
++			return true;
++		}
++	}
++	return false;
++}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
++
+ /*
+  *  Routine:    mach_msg_receive_results
+  *  Purpose:
+@@ -226,6 +260,22 @@ mach_msg_receive_results_kevent(
+ 	mach_msg_option64_t option64 = self->ith_option;
+ 	ipc_kmsg_t        kmsg = self->ith_kmsg;
+ 	mach_port_seqno_t seqno = self->ith_seqno;
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	bool peridot_trace = peridot_ipc_trace_enabled();
++	const char *peridot_name = NULL;
++	if (peridot_trace) {
++		peridot_name = proc_name_address(current_proc());
++		if (mr == MACH_MSG_SUCCESS && kmsg != IKM_NULL) {
++			mach_msg_header_t *hdr = ikm_header(kmsg);
++			printf("IPC RCV %s[%d] tid=%llu port=%u portp=%p id=%d size=%u bits=0x%x seq=%u\n",
++			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name,
++			    hdr->msgh_remote_port, hdr->msgh_id, hdr->msgh_size, hdr->msgh_bits, seqno);
++		} else {
++			printf("IPC RCV-ERR %s[%d] tid=%llu port=%u mr=0x%x\n",
++			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name, mr);
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
+ 
+ 	mach_msg_size_t   cpout_msg_size = 0, cpout_aux_size = 0;
+ 
+@@ -556,8 +606,6 @@ mach_msg_copyin_data_vectors(
+ static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", false);
+ #endif /* DEVELOPMENT || DEBUG */
+ 
+-extern char *proc_name_address(struct proc *p);
+-
+ CA_EVENT(mach_msg_trap_event,
+     CA_INT, msgh_id,
+     CA_INT, sw_platform,
+@@ -781,6 +829,8 @@ mach_msg_trap_send(
+ 	mach_msg_size_t     desc_count)
+ {
+ 	ipc_kmsg_t kmsg;
++	bool peridot_trace = false;
++	const char *peridot_name = NULL;
+ 
+ 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
+ 	vm_map_t map = current_map();
+@@ -825,6 +875,17 @@ mach_msg_trap_send(
+ 		return MACH_SEND_TOO_LARGE;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	peridot_trace = peridot_ipc_trace_enabled();
++	if (peridot_trace) {
++		peridot_name = proc_name_address(current_proc());
++		printf("IPC SEND %s[%d] tid=%llu id=%d remote=%u local=%u bits=0x%x size=%u opt=0x%llx\n",
++		    peridot_name, task_pid(current_task()), thread_tid(current_thread()),
++		    user_header.msgh_id, user_header.msgh_remote_port, user_header.msgh_local_port,
++		    user_header.msgh_bits, msg_send_size, option64);
++	}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
++
+ 	/*
+ 	 * Now that we have validated msg_send_size, aux_send_size and desc_count,
+ 	 * copy in the message.
+@@ -847,11 +908,28 @@ mach_msg_trap_send(
+ 	    filter_nonfatal);
+ 
+ 	if (mr != MACH_MSG_SUCCESS) {
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++		if (peridot_trace) {
++			printf("IPC SEND-COPYIN-ERR %s[%d] tid=%llu id=%d mr=0x%x\n",
++			    peridot_name, task_pid(current_task()), thread_tid(current_thread()),
++			    user_header.msgh_id, mr);
++		}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
+ 		ipc_kmsg_free(kmsg);
+ 		return mr;
+ 	}
+ 
++	if (peridot_trace) {
++		printf("IPC SEND-DISPATCH %s[%d] tid=%llu id=%d dst=%p\n",
++		    peridot_name, task_pid(current_task()), thread_tid(current_thread()),
++		    user_header.msgh_id, ikm_header(kmsg)->msgh_remote_port);
++	}
+ 	mr = ipc_kmsg_send(kmsg, option64, msg_timeout);
++	if (peridot_trace) {
++		printf("IPC SEND-RET %s[%d] tid=%llu id=%d mr=0x%x\n",
++		    peridot_name, task_pid(current_task()), thread_tid(current_thread()),
++		    user_header.msgh_id, mr);
++	}
+ 
+ 	if (mr != MACH_MSG_SUCCESS) {
+ 		/* we still have the kmsg */
+@@ -892,6 +970,8 @@ mach_msg_trap_receive(
+ 	thread_t           self = current_thread();
+ 	ipc_space_t        space = current_space();
+ 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
++	bool peridot_trace = false;
++	const char *peridot_name = NULL;
+ 
+ 	assert(option64 & MACH64_RCV_MSG);
+ 
+@@ -926,11 +1006,26 @@ mach_msg_trap_receive(
+ 	self->ith_receiver_name = MACH_PORT_NULL;
+ 	self->ith_knote = ITH_KNOTE_NULL;
+ 
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	peridot_trace = peridot_ipc_trace_enabled();
++	if (peridot_trace) {
++		peridot_name = proc_name_address(current_proc());
++		printf("IPC WAIT %s[%d] tid=%llu port=%u max=%u opt=0x%llx timeout=%u\n",
++		    peridot_name, task_pid(current_task()), thread_tid(self), rcv_name,
++		    max_msg_rcv_size, option64, msg_timeout);
++	}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
++
+ 	ipc_mqueue_receive(io_waitq(object),
+ 	    option64, max_msg_rcv_size,
+ 	    max_aux_rcv_size, msg_timeout,
+ 	    THREAD_ABORTSAFE, /* continuation ? */ true);
+ 	/* NOTREACHED if thread started waiting */
++	if (peridot_trace) {
++		printf("IPC WAKE %s[%d] tid=%llu port=%u state=0x%x size=%u seq=%u\n",
++		    peridot_name, task_pid(current_task()), thread_tid(self), rcv_name,
++		    self->ith_state, self->ith_msize, self->ith_seqno);
++	}
+ 
+ 	if ((option64 & MACH_RCV_TIMEOUT) && msg_timeout == 0) {
+ 		thread_poll_yield(self);
