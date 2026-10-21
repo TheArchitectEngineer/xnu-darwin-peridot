@@ -1,0 +1,23 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -972,14 +972,13 @@
+ 				}
+ 				size_t run = i - start;
+ 				if (run >= 24 && spaces >= 2) {
+-					char text[160];
+-					size_t m = run < sizeof(text) - 1 ? run : sizeof(text) - 1;
+-					memcpy(text, buf + start, m);
+-					text[m] = 0;
+-					if (strncmp(text, last, sizeof(last) - 1) != 0) {
+-						printf("STR %s\n", text);
++					for (size_t chunk = 0; chunk < run && lines < 700; chunk += 159) {
++						char text[160];
++						size_t m = run - chunk < sizeof(text) - 1 ? run - chunk : sizeof(text) - 1;
++						memcpy(text, buf + start + chunk, m);
++						text[m] = 0;
++						printf("STR+%zu %s\n", chunk, text);
+ 						lines++;
+-						strlcpy(last, text, sizeof(last));
+ 					}
+ 				}
+ 				start = i + 1;

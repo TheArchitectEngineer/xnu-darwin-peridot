@@ -1,0 +1,15 @@
+--- a/iokit/Kernel/arm/PeridotSurface.cpp
++++ b/iokit/Kernel/arm/PeridotSurface.cpp
+@@ -1188,5 +1188,12 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 	}
+ 	default:
++		/* Do not report a successful lock with an all-zero surface result. */
++		if ((args->structureOutputDescriptor != NULL &&
++		    args->structureOutputDescriptor->getLength() >= PERIDOT_SURFACE_RESULT_SIZE) ||
++		    (args->structureOutput != NULL && args->structureOutputSize >= PERIDOT_SURFACE_RESULT_SIZE)) {
++			peridot_surf_log_once("sel (refused: lock result)", selector);
++			return kIOReturnUnsupported;
++		}
+ 		/* Values, notifications, ownership, timestamps...: accept and ignore. */
+ 		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
+ 			args->scalarOutput[i] = 0;
