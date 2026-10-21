@@ -1,0 +1,96 @@
+--- a/osfmk/ipc/mach_msg.c
++++ b/osfmk/ipc/mach_msg.c
+@@ -261,18 +261,28 @@
+ 	ipc_kmsg_t        kmsg = self->ith_kmsg;
+ 	mach_port_seqno_t seqno = self->ith_seqno;
+ #if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	/*
++	 * Note: this runs before mach_msg_receive_results_complete() below, which
++	 * is what reclaims the turnstile this thread donated to the port. The
++	 * trace only records the header fields here; the console write is done
++	 * after the turnstile is back (see below), because a console flush can
++	 * take a kernel mutex and turnstile_prepare() would then find
++	 * thread->turnstile == NULL and panic at turnstile.c:1003.
++	 */
+ 	bool peridot_trace = peridot_ipc_trace_enabled();
+ 	const char *peridot_name = NULL;
++	mach_msg_id_t peridot_id = 0;
++	mach_port_name_t peridot_remote = 0;
++	mach_msg_bits_t peridot_bits = 0;
++	mach_msg_size_t peridot_size = 0;
+ 	if (peridot_trace) {
+ 		peridot_name = proc_name_address(current_proc());
+ 		if (mr == MACH_MSG_SUCCESS && kmsg != IKM_NULL) {
+ 			mach_msg_header_t *hdr = ikm_header(kmsg);
+-			printf("IPC RCV %s[%d] tid=%llu port=%u portp=%p id=%d size=%u bits=0x%x seq=%u\n",
+-			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name,
+-			    hdr->msgh_remote_port, hdr->msgh_id, hdr->msgh_size, hdr->msgh_bits, seqno);
+-		} else {
+-			printf("IPC RCV-ERR %s[%d] tid=%llu port=%u mr=0x%x\n",
+-			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name, mr);
++			peridot_id = hdr->msgh_id;
++			peridot_remote = hdr->msgh_remote_port;
++			peridot_bits = hdr->msgh_bits;
++			peridot_size = hdr->msgh_size;
+ 		}
+ 	}
+ #endif /* ARM64_BOARD_CONFIG_PERIDOT */
+@@ -286,6 +296,20 @@
+ 	mach_msg_receive_results_complete(object);
+ 	io_release(object);
+ 
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	/* The thread's turnstile is restored: the console write is safe here. */
++	if (peridot_trace) {
++		if (mr == MACH_MSG_SUCCESS && kmsg != IKM_NULL) {
++			printf("IPC RCV %s[%d] tid=%llu port=%u portp=%p id=%d size=%u bits=0x%x seq=%u\n",
++			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name,
++			    peridot_remote, peridot_id, peridot_size, peridot_bits, seqno);
++		} else {
++			printf("IPC RCV-ERR %s[%d] tid=%llu port=%u mr=0x%x\n",
++			    peridot_name, task_pid(current_task()), thread_tid(self), receiver_name, mr);
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
++
+ 	if (option64 & MACH64_RCV_LINEAR_VECTOR) {
+ 		assert(aux_rcv_addr == 0);
+ 		assert(aux_rcv_size == 0);
+@@ -1021,11 +1045,17 @@
+ 	    max_aux_rcv_size, msg_timeout,
+ 	    THREAD_ABORTSAFE, /* continuation ? */ true);
+ 	/* NOTREACHED if thread started waiting */
+-	if (peridot_trace) {
+-		printf("IPC WAKE %s[%d] tid=%llu port=%u state=0x%x size=%u seq=%u\n",
+-		    peridot_name, task_pid(current_task()), thread_tid(self), rcv_name,
+-		    self->ith_state, self->ith_msize, self->ith_seqno);
+-	}
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	/*
++	 * Deferred: after a wait this thread's turnstile is donated to the port
++	 * and only reclaimed by mach_msg_receive_results() below. Printing here
++	 * could take the console ring mutex and panic in turnstile_prepare().
++	 * Capture the state now, write it after the receive completes.
++	 */
++	uint32_t peridot_wake_state = self->ith_state;
++	mach_msg_size_t peridot_wake_size = self->ith_msize;
++	mach_port_seqno_t peridot_wake_seq = self->ith_seqno;
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
+ 
+ 	if ((option64 & MACH_RCV_TIMEOUT) && msg_timeout == 0) {
+ 		thread_poll_yield(self);
+@@ -1034,6 +1064,14 @@
+ 	mr = mach_msg_receive_results();
+ 	/* release ref on ith_object */
+ 
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	if (peridot_trace) {
++		printf("IPC WAKE %s[%d] tid=%llu port=%u state=0x%x size=%u seq=%u\n",
++		    peridot_name, task_pid(current_task()), thread_tid(self), rcv_name,
++		    peridot_wake_state, peridot_wake_size, peridot_wake_seq);
++	}
++#endif /* ARM64_BOARD_CONFIG_PERIDOT */
++
+ 	return mr;
+ }
+ 
