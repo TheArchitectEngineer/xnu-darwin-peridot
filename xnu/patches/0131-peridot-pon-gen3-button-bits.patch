@@ -1,0 +1,23 @@
+--- a/bsd/dev/peridot_keys.c
++++ b/bsd/dev/peridot_keys.c
+@@ -3,7 +3,7 @@
+  * Hardware (peridot.dts qcom,spmi@c42d000): the SPMI arbiter is v7, so the
+  * observer and mapping register layouts differ from the sweet v5 driver.
+  * Power and volume-down come from the PMK8550 PON (SID 0, pon_hlos@1300,
+- * PON_RT_STS 0x10: KPDPWR bit0, RESIN bit1); volume-up is PMXR2230
++ * PON_RT_STS 0x10: Gen3 KPDPWR_N_SET bit7, RESIN_N_SET bit6); volume-up is PMXR2230
+  * (SID 1) GPIO6 (pinctrl@8800, base 0x8800 + 6*0x100, PMIC_MPP_REG_RT_STS
+  * 0x10, active low). PMIC access is READ ONLY: the sole MMIO write issues
+  * EXT_READL on an observer channel. No config, IRQ acknowledge or reset.
+@@ -36,8 +36,9 @@
+  */
+ #define KEYS_PON_SID     0u
+ #define KEYS_PON_RT      0x1310u
+-#define KEYS_PON_KPDPWR  0x1u
+-#define KEYS_PON_RESIN   0x2u
++/* PMK8350/PMK8550 PON Gen3 status bits (Linux pm8941-pwrkey.c). */
++#define KEYS_PON_KPDPWR  0x80u
++#define KEYS_PON_RESIN   0x40u
+ #define KEYS_VOLUP_SID   1u
+ #define KEYS_VOLUP_RT    0x8e10u
+ #define KEYS_NO_APID     0xffffu
