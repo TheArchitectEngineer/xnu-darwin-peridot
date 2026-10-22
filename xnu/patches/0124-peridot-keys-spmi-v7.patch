@@ -1,0 +1,226 @@
+--- a/bsd/dev/peridot_keys.c
++++ b/bsd/dev/peridot_keys.c
+@@ -1,8 +1,12 @@
+ /*
+  * Minimal polled PERIDOT keys. Call once after the scheduler is running.
+- * See hw-report.md: volume-up is PM6150L SID 4, NOT PM6150 SID 0.
+- * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+- * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
++ * Hardware (peridot.dts qcom,spmi@c42d000): the SPMI arbiter is v7, so the
++ * observer and mapping register layouts differ from the sweet v5 driver.
++ * Power and volume-down come from the PMK8550 PON (SID 0, pon_hlos@1300,
++ * PON_RT_STS 0x10: KPDPWR bit0, RESIN bit1); volume-up is PMXR2230
++ * (SID 1) GPIO6 (pinctrl@8800, base 0x8800 + 6*0x100, PMIC_MPP_REG_RT_STS
++ * 0x10, active low). PMIC access is READ ONLY: the sole MMIO write issues
++ * EXT_READL on an observer channel. No config, IRQ acknowledge or reset.
+  */
+ #if defined(ARM64_BOARD_CONFIG_PERIDOT)
+ #include <sys/param.h>
+@@ -15,23 +19,48 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void peridot_hid_key(int key, int down);
++
+ void peridot_keys_init(void);
+ 
+ /*
+  * peridot.dts qcom,spmi@c42d000 reg-names cnfg/core/chnls/obsrvr/intr:
+- * cnfg 0xc42d000, core 0xc400000, obsrvr 0xc440000. The sweet addresses
+- * (core 0xc440000, obsrvr 0xe600000, cnfg 0xc40a000) read the arbiter
+- * version out of the wrong region, so peridot keys never came up.
++ * cnfg 0xc42d000, core 0xc400000, obsrvr 0xc440000.
+  */
+ #define KEYS_CORE_PA     0x0c400000u
+ #define KEYS_OBS_PA      0x0c440000u
+ #define KEYS_CNFG_PA     0x0c42d000u
+-#define KEYS_PON_RT      0x0810u
+-#define KEYS_GPIO_RT     0xc110u
++
++/*
++ * SPMI peripheral addresses: SID in PPID[11:8], register in the low byte.
++ * PON PON_RT_STS = 0x1300 + 0x10; PMXR2230 GPIO6 = 0x8800 + 6*0x100 + 0x10.
++ */
++#define KEYS_PON_SID     0u
++#define KEYS_PON_RT      0x1310u
++#define KEYS_PON_KPDPWR  0x1u
++#define KEYS_PON_RESIN   0x2u
++#define KEYS_VOLUP_SID   1u
++#define KEYS_VOLUP_RT    0x8e10u
+ #define KEYS_NO_APID     0xffffu
+ 
++/* v7 arbiter layout (drivers/spmi/spmi-pmic-arb.c). */
++#define KEYS_APID_MAP_V7     0x2000u
++#define KEYS_MAPPING_TABLE   0x0b00u
++#define KEYS_RD_CMD          0x00u
++#define KEYS_RD_STATUS       0x08u
++#define KEYS_RD_DATA         0x18u
++#define KEYS_OP_EXT_READL    1u
++#define KEYS_STATUS_DONE     0x1u
++#define KEYS_STATUS_FAIL     0x0eu
++
++#define KEYS_MAPPING_INDEX(x)     (((x) >> 18) & 0xfu)
++#define KEYS_MAPPING_IS0_FLAG(x)  (((x) >> 17) & 0x1u)
++#define KEYS_MAPPING_IS0_RES(x)   (((x) >> 9) & 0xffu)
++#define KEYS_MAPPING_IS1_FLAG(x)  (((x) >> 8) & 0x1u)
++#define KEYS_MAPPING_IS1_RES(x)   (((x) >> 0) & 0xffu)
++#define KEYS_MAPPING_DEPTH        16u
++
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+-static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
++static uint16_t keys_pon_apid = KEYS_NO_APID, keys_volup_apid = KEYS_NO_APID;
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+ static int keys_sleep_chan;
+@@ -44,24 +73,31 @@
+ 	return v;
+ }
+ 
+-/* v5 can map one PPID more than once; prefer the apps-owned entry. */
++/*
++ * v7 maps PPID to APID through a 16-deep binary search tree in the cnfg
++ * region; a leaf encodes the APID. See pmic_arb_ppid_to_apid_v5/v7.
++ */
+ static uint16_t
+-keys_find_apid(uint16_t ppid, uint32_t count)
++keys_ppid_to_apid(uint16_t ppid)
+ {
+-	uint16_t found = KEYS_NO_APID;
+-	/* APID ownership table: v5 at core+0x900, v7 at core+0x2000 (Linux). */
+-	uint32_t mapoff = keys_version >= 0x70000000u ? 0x2000u : 0x900u;
+-	for (uint32_t i = 0; i < count; ++i) {
+-		uint32_t map = keys_rd(keys_core, mapoff + 4u * i);
+-		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
+-			continue;
+-		}
+-		uint32_t owner = keys_rd(keys_cnfg, 0x700u + 4u * i) & 7u;
+-		if (found == KEYS_NO_APID || owner == 0) {
+-			found = (uint16_t)i;
++	uint32_t index = 0;
++	for (unsigned i = 0; i < KEYS_MAPPING_DEPTH; ++i) {
++		uint32_t data = keys_rd(keys_cnfg, KEYS_MAPPING_TABLE + 4u * index);
++		if (ppid & (1u << KEYS_MAPPING_INDEX(data))) {
++			if (KEYS_MAPPING_IS1_FLAG(data)) {
++				index = KEYS_MAPPING_IS1_RES(data);
++			} else {
++				return (uint16_t)KEYS_MAPPING_IS1_RES(data);
++			}
++		} else {
++			if (KEYS_MAPPING_IS0_FLAG(data)) {
++				index = KEYS_MAPPING_IS0_RES(data);
++			} else {
++				return (uint16_t)KEYS_MAPPING_IS0_RES(data);
++			}
+ 		}
+ 	}
+-	return found;
++	return KEYS_NO_APID;
+ }
+ 
+ static bool
+@@ -70,18 +106,19 @@
+ 	if (apid == KEYS_NO_APID) {
+ 		return false;
+ 	}
+-	uint32_t off = 0x80u * apid; /* obs + EE(0)*0x10000 */
+-	uint32_t cmd = (1u << 27) | ((uint32_t)(addr & 0xffu) << 4);
++	/* v7 observer stride: 0x8000*ee + 0x20*apid (ee 0). */
++	uint32_t off = 0x20u * apid;
++	uint32_t cmd = (KEYS_OP_EXT_READL << 27) | ((uint32_t)(addr & 0xffu) << 4);
+ 	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(keys_obs + off) = cmd; /* EXT_READL, one byte */
++	*(volatile uint32_t *)(keys_obs + off + KEYS_RD_CMD) = cmd;
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ 	for (unsigned i = 0; i < 1000; ++i) {
+-		keys_last_status = keys_rd(keys_obs, off + 0x08u);
+-		if (keys_last_status & 1u) {
+-			if (keys_last_status & 0x0eu) {
++		keys_last_status = keys_rd(keys_obs, off + KEYS_RD_STATUS);
++		if (keys_last_status & KEYS_STATUS_DONE) {
++			if (keys_last_status & KEYS_STATUS_FAIL) {
+ 				return false;
+ 			}
+-			*out = (uint8_t)keys_rd(keys_obs, off + 0x18u);
++			*out = (uint8_t)keys_rd(keys_obs, off + KEYS_RD_DATA);
+ 			return true;
+ 		}
+ 		delay(1);
+@@ -108,11 +145,12 @@
+ 	for (;;) {
+ 		uint8_t pon = 0, gpio = 0;
+ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
++		bool gok = keys_read(keys_volup_apid, KEYS_VOLUP_RT, &gpio);
++		int now[3] = {!!(pon & KEYS_PON_KPDPWR),
++		    !(gpio & 1u), !!(pon & KEYS_PON_RESIN)};
+ 		if (!pok || !gok) {
+ 			if ((errors++ % 250u) == 0) {
+-				printf("PERIDOT KEYS: read error pon-ok=%d gpio-ok=%d arb-status=%#x\n",
++				printf("PERIDOT KEYS: read error pon-ok=%d volup-ok=%d arb-status=%#x\n",
+ 				    pok, gok, keys_last_status);
+ 			}
+ 		} else {
+@@ -121,7 +159,7 @@
+ 		for (int k = 0; k < 3; ++k) {
+ 			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("PERIDOT KEYS: key=%d down=%d pon=%#x gpio4:c110=%#x\n",
++				printf("PERIDOT KEYS: key=%d down=%d pon=%#x volup=%#x\n",
+ 				    k, state[k], pon, gpio);
+ 				peridot_hid_key(k, state[k]);
+ 			}
+@@ -144,8 +182,8 @@
+ 		printf("PERIDOT KEYS: disabled (peridotkeys=0)\n");
+ 		return;
+ 	}
+-	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+-	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
++	keys_core = ml_io_map(KEYS_CORE_PA, 0x4000);
++	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x4000);
+ 	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
+ 	if (!keys_core || !keys_cnfg || !keys_obs) {
+ 		printf("PERIDOT KEYS: MMIO mapping failed\n");
+@@ -153,33 +191,21 @@
+ 	}
+ 	keys_version = keys_rd(keys_core, 0);
+ 	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
+-	printf("PERIDOT KEYS: arb version=%#x apids=%u core=%#x obs=%#x cnfg=%#x\n",
+-	    keys_version, count, keys_rd(keys_core, 0), keys_rd(keys_obs, 0),
+-	    keys_rd(keys_cnfg, 0));
+-	/* Linux: v2 is the floor (0x20010000); v5 divides APID space (>= 0x50000000). */
+-	if (keys_version < 0x20010000u || count == 0 || count > 512) {
++	if (keys_version < 0x20010000u || count == 0 || count > 1024) {
+ 		printf("PERIDOT KEYS: unsupported arbiter version=%#x apids=%u\n",
+ 		    keys_version, count);
+ 		return;
+ 	}
+-	keys_pon_apid = keys_find_apid(0x008, count);
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
+-	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
++	keys_pon_apid = keys_ppid_to_apid((uint16_t)((KEYS_PON_SID << 8) |
++	    (KEYS_PON_RT >> 8)));
++	keys_volup_apid = keys_ppid_to_apid((uint16_t)((KEYS_VOLUP_SID << 8) |
++	    (KEYS_VOLUP_RT >> 8)));
++	uint8_t pon = 0, gpio = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+-	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+-	bool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);
+-	printf("PERIDOT KEYS: arb=%#x apids=%u pon-apid=%u gpio4-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
+-	    keys_version, count, keys_pon_apid, keys_gpio_apid,
+-	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
+-	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+-	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+-	    mode & 3u : (mode >> 4) & 7u;
+-	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("PERIDOT KEYS: GPIO2 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+-		keys_gpio_apid = KEYS_NO_APID;
+-	}
++	bool gok = keys_read(keys_volup_apid, KEYS_VOLUP_RT, &gpio);
++	printf("PERIDOT KEYS: arb=%#x apids=%u pon-apid=%u volup-apid=%u pon=%#x/%d volup=%#x/%d\n",
++	    keys_version, count, keys_pon_apid, keys_volup_apid,
++	    pon, pok, gpio, gok);
+ 	if (!pok && !gok) {
+ 		printf("PERIDOT KEYS: no readable keys; polling retained for recovery\n");
+ 	}

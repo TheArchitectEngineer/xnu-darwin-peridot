@@ -1,0 +1,110 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -27,6 +27,24 @@
+ #define TOUCH_SE_PA      0x00a90000u
+ /* peridot.dts pinctrl@f000000, interrupt-parent of xiaomi_touch@0. */
+ #define TOUCH_TLMM_PA    0x0f000000u
++/*
++ * peridot.dts clock-controller@100000 "qcom,cliffs-gcc", reg 0x100000 0x1f4200.
++ * SE4 (qupv3_wrap0_s4) clock offsets from drivers/clk/qcom/gcc-cliffs.c:
++ * branch + m_ahb + s_ahb enable votes share GCC 0x52008 (bits 26/20/21),
++ * the SE4 RCG is cmd_rcgr 0x183c8 (CFG +4), halts 0x183bc/0x23000/0x23004.
++ */
++#define TOUCH_GCC_PA     0x00100000u
++#define GCC_VOTE_OFF     0x52000u
++#define GCC_RCG_OFF      0x18000u
++#define GCC_AHB_OFF      0x23000u
++#define GCC_SE_VOTE      0x008u
++#define GCC_VOTE_M_AHB   (1u << 20)
++#define GCC_VOTE_S_AHB   (1u << 21)
++#define GCC_VOTE_SE4     (1u << 26)
++#define GCC_SE4_CMD      0x3c8u
++#define GCC_SE4_HALT     0x3bcu
++#define GCC_M_AHB_HALT   0x000u
++#define GCC_S_AHB_HALT   0x004u
+ #define TOUCH_MAX        10u
+ #define TOUCH_GOODIX     1
+ #define TOUCH_FTS        2
+@@ -96,6 +114,9 @@
+ 
+ static struct {
+ 	vm_offset_t se;
++	vm_offset_t gcc;      /* GCC + 0x52000 (branch enable votes) */
++	vm_offset_t gcc_rcg;  /* GCC + 0x18000 (SE4 RCG + halt) */
++	vm_offset_t gcc_ahb;  /* GCC + 0x23000 (wrapper AHB halts) */
+ 	/* peridot.dts xiaomi_touch: goodix,reset-gpio <0x16b 0x80>, irq <0x16b 0x81>. */
+ 	vm_offset_t gpio128, gpio129;
+ 	bool started, dead, probing;
+@@ -175,12 +196,39 @@
+ touch_clocks(void)
+ {
+ 	/*
+-	 * Rely on ABL/XBL having clocked GENI SE4 to load its I2C firmware.
+-	 * sweet's wrapper1/SE7 GCC vote is not used: its offsets are a sweet
+-	 * layout and unverified on SM8635 cliffs; writing them could corrupt
+-	 * an unrelated clock. Log explicitly so the boot log shows this choice.
++	 * The SE4 read back proto=1 (SPI) but the live registers (IOS=0,
++	 * out=0) show ABL did not leave the block clocked: Android loads
++	 * touch from Linux, so vote the GCC QUPv3_0 wrapper + SE4 clocks on.
++	 * Offsets are peridot cliffs (gcc-cliffs.c), not sweet: OR only the
++	 * enable bits so any existing users stay up, and put the SE4 RCG on
++	 * the always-on XO (19.2 MHz, pre_div 1) rather than a GPLL.
+ 	 */
+-	printf("PERIDOT TOUCH: clocks assumed ABL-loaded (SE4), no GCC vote\n");
++	uint32_t before = touch_rd(st.gcc, GCC_SE_VOTE);
++	touch_wr(st.gcc, GCC_SE_VOTE,
++	    before | GCC_VOTE_M_AHB | GCC_VOTE_S_AHB | GCC_VOTE_SE4);
++	/* CFG: pre_div 1 (bits 3:0 = 1), source XO (sel 0), HW clk ctrl (bit 20). */
++	uint32_t cfg = touch_rd(st.gcc_rcg, GCC_SE4_CMD + 4u);
++	cfg = (cfg & ~(0xfu | (0x7u << 8) | (0x3u << 12) | (1u << 20))) | 1u | (1u << 20);
++	touch_wr(st.gcc_rcg, GCC_SE4_CMD + 4u, cfg);
++	touch_wr(st.gcc_rcg, GCC_SE4_CMD, touch_rd(st.gcc_rcg, GCC_SE4_CMD) | 1u);
++	printf("PERIDOT TOUCH: gcc vote %#x -> %#x cfg=%#x\n",
++	    before, touch_rd(st.gcc, GCC_SE_VOTE), cfg);
++	if (!touch_wait_clear(st.gcc_rcg, GCC_SE4_CMD, 1u)) {
++		printf("PERIDOT TOUCH: SE4 RCG update timeout (%#x)\n",
++		    touch_rd(st.gcc_rcg, GCC_SE4_CMD));
++		return false;
++	}
++	if (!touch_wait_clear(st.gcc_ahb, GCC_M_AHB_HALT, 1u << 31) ||
++	    !touch_wait_clear(st.gcc_ahb, GCC_S_AHB_HALT, 1u << 31) ||
++	    !touch_wait_clear(st.gcc_rcg, GCC_SE4_HALT, 1u << 31)) {
++		printf("PERIDOT TOUCH: GCC branch halted (m_ahb=%#x s_ahb=%#x se4=%#x)\n",
++		    touch_rd(st.gcc_ahb, GCC_M_AHB_HALT), touch_rd(st.gcc_ahb, GCC_S_AHB_HALT),
++		    touch_rd(st.gcc_rcg, GCC_SE4_HALT));
++		return false;
++	}
++	printf("PERIDOT TOUCH: SE4 clocks on (m_ahb=%#x s_ahb=%#x se4=%#x)\n",
++	    touch_rd(st.gcc_ahb, GCC_M_AHB_HALT), touch_rd(st.gcc_ahb, GCC_S_AHB_HALT),
++	    touch_rd(st.gcc_rcg, GCC_SE4_HALT));
+ 	return true;
+ }
+ 
+@@ -527,9 +575,10 @@
+ 	bool fifo_ok = ((tx >> 24) & 0x3fu) == 32u && ((rx >> 24) & 0x3fu) == 32u &&
+ 	    ((tx >> 16) & 0x3fu) >= 2u && ((rx >> 16) & 0x3fu) >= 2u;
+ 	bool proto_ok = ((fw >> 8) & 0xffu) == GENI_PROTO_SPI;
+-	if (!fifo_ok || ((!proto_ok) && !force) || (touch_rd(st.se, 0x64) & 1u)) {
+-		printf("PERIDOT TOUCH: SE4 not SPI-ready (proto=%u fifo=%d force=%d); probes skipped\n",
+-		    (fw >> 8) & 0xffu, fifo_ok, force);
++	uint32_t ifd = touch_rd(st.se, 0x64);
++	if (!fifo_ok || ((!proto_ok) && !force) || ((ifd & 1u) && !force)) {
++		printf("PERIDOT TOUCH: SE4 not SPI-ready (proto=%u fifo=%d ifdisable=%#x force=%d); probes skipped\n",
++		    (fw >> 8) & 0xffu, fifo_ok, ifd, force);
+ 		return false;
+ 	}
+ 	if (!proto_ok) {
+@@ -603,9 +652,12 @@
+ 	 */
+ 	printf("PERIDOT TOUCH: mapping TLMM/SE4\n");
+ 	st.se = ml_io_map(TOUCH_SE_PA, 0x1000);
++	st.gcc = ml_io_map(TOUCH_GCC_PA + GCC_VOTE_OFF, 0x1000);
++	st.gcc_rcg = ml_io_map(TOUCH_GCC_PA + GCC_RCG_OFF, 0x1000);
++	st.gcc_ahb = ml_io_map(TOUCH_GCC_PA + GCC_AHB_OFF, 0x1000);
+ 	st.gpio128 = ml_io_map(TOUCH_TLMM_PA + 128u * 0x1000u, 0x1000);
+ 	st.gpio129 = ml_io_map(TOUCH_TLMM_PA + 129u * 0x1000u, 0x1000);
+-	if (!st.se || !st.gpio128 || !st.gpio129) {
++	if (!st.se || !st.gcc || !st.gcc_rcg || !st.gcc_ahb || !st.gpio128 || !st.gpio129) {
+ 		printf("PERIDOT TOUCH: MMIO mapping failed\n");
+ 		goto out;
+ 	}

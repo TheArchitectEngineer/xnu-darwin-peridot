@@ -1,0 +1,170 @@
+--- a/bsd/dev/peridot_ufs.c
++++ b/bsd/dev/peridot_ufs.c
+@@ -49,6 +49,7 @@
+ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void peridot_log_start(void);
++extern void peridot_log_panic_flush(void);
+ extern void peridot_sample_start(void);
+ extern void peridot_keys_init(void);
+ extern void peridot_touch_init(void);
+@@ -829,53 +830,89 @@
+ 	uint64_t total, seq;
+ };
+ 
+-static void
+-peridot_log_thread(__unused void *arg, __unused wait_result_t wr)
++static uint64_t peridot_log_flushed;
++static uint64_t peridot_log_seq;
++
++/*
++ * Copy every ring byte not yet on the partition. Caller holds the UFS lock (or
++ * is the sole live core). Shared by the background flusher and the panic path.
++ */
++static int
++peridot_log_flush_locked(uint64_t total)
+ {
+ 	uint64_t base = su.first_block + su.nblocks - PERIDOT_LOG_BLOCKS;
+-	uint64_t flushed = 0, seq = 0;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	uint64_t pos = total - peridot_log_flushed >= PERIDOT_LOG_SIZE ?
++	    total - PERIDOT_LOG_SIZE : peridot_log_flushed;
++	int error = 0;
++
++	while (pos < total && !error) {
++		uint32_t off = (uint32_t)(pos % PERIDOT_LOG_SIZE);
++		uint32_t blk = off / UFS_BLOCK;
++		uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++		uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(PERIDOT_LOG_SIZE / UFS_BLOCK - blk)),
++		    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
++		memcpy(bounce, peridot_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
++		error = ufs_write_blocks(base + 1 + blk, n);
++		pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
++	}
++	if (!error) {
++		struct peridot_log_header h = {
++			.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
++			.version = 1, .size = PERIDOT_LOG_SIZE, .total = total, .seq = ++peridot_log_seq,
++		};
++		bzero(bounce, UFS_BLOCK);
++		memcpy(bounce, &h, sizeof(h));
++		error = ufs_write_blocks(base, 1);
++	}
++	if (!error) {
++		error = ufs_sync_cache();
++	}
++	if (!error) {
++		peridot_log_flushed = total;
++	}
++	return error;
++}
+ 
++/*
++ * Best-effort synchronous flush for the panic path, where the flusher thread
++ * never runs. The other cores are halted by the time this is called, so no
++ * lock is taken (the UFS layer is otherwise idle at that point).
++ */
++void
++peridot_log_panic_flush(void)
++{
++	uint64_t total;
++
++	if (!su.ready || !su.writable) {
++		return;
++	}
++	total = os_atomic_load(&peridot_log_total, relaxed);
++	if (total == peridot_log_flushed) {
++		return;
++	}
++	(void)peridot_log_flush_locked(total);
++}
++
++static void
++peridot_log_thread(__unused void *arg, __unused wait_result_t wr)
++{
+ 	printf("PERIDOT LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+-	    PERIDOT_LOG_BLOCKS * UFS_BLOCK >> 10, base);
++	    PERIDOT_LOG_BLOCKS * UFS_BLOCK >> 10, su.first_block + su.nblocks - PERIDOT_LOG_BLOCKS);
+ 	for (;;) {
+ 		(void)tsleep(&peridot_log_chan, PZERO, "peridotlog", hz * (int)peridot_log_secs);
+ 		uint64_t total = os_atomic_load(&peridot_log_total, relaxed);
+-		if (total == flushed) {
++		if (total == peridot_log_flushed) {
+ 			continue;
+ 		}
+-		uint64_t pos = total - flushed >= PERIDOT_LOG_SIZE ? total - PERIDOT_LOG_SIZE : flushed;
+-		int error = 0;
+ 
+ 		lck_mtx_lock(&peridot_ufs_lock);
+-		while (pos < total && !error) {
+-			uint32_t off = (uint32_t)(pos % PERIDOT_LOG_SIZE);
+-			uint32_t blk = off / UFS_BLOCK;
+-			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(PERIDOT_LOG_SIZE / UFS_BLOCK - blk)),
+-			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+-			memcpy(bounce, peridot_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+-			error = ufs_write_blocks(base + 1 + blk, n);
+-			pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+-		}
+-		if (!error) {
+-			struct peridot_log_header h = {
+-				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+-				.version = 1, .size = PERIDOT_LOG_SIZE, .total = total, .seq = ++seq,
+-			};
+-			bzero(bounce, UFS_BLOCK);
+-			memcpy(bounce, &h, sizeof(h));
+-			error = ufs_write_blocks(base, 1);
+-		}
+-		if (!error) {
+-			error = ufs_sync_cache();
+-		}
++		int error = peridot_log_flush_locked(total);
+ 		lck_mtx_unlock(&peridot_ufs_lock);
+ 		if (error) {
+ 			printf("PERIDOT LOG: write failed (%d), stopping\n", error);
+ 			return;
+ 		}
+-		flushed = total;
+ 	}
+ }
+ 
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -249,6 +249,9 @@
+ void panic_spin_forever(void) __dead2;
+ extern kern_return_t do_stackshot(void);
+ extern void PE_panic_hook(const char*);
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++extern void peridot_log_panic_flush(void);  /* bsd/dev/peridot_ufs.c */
++#endif
+ 
+ #define NESTEDDEBUGGERENTRYMAX 5
+ static TUNABLE(unsigned int, max_debugger_entry_count, "nested_panic_max",
+@@ -1310,6 +1313,14 @@
+ 		 */
+ 		SavePanicInfo(debugger_message, debugger_panic_data, debugger_panic_options);
+ 
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++		/*
++		 * Persist the console ring now; the background flusher thread never
++		 * runs once we reach here.
++		 */
++		peridot_log_panic_flush();
++#endif
++
+ #if DEVELOPMENT || DEBUG
+ 		INJECT_NESTED_PANIC_IF_REQUESTED(PANIC_TEST_CASE_RECURPANIC_POSTLOG);
+ #endif
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -911,6 +911,10 @@
+ void
+ consdebug_putc(char c)
+ {
++#if defined(ARM64_BOARD_CONFIG_PERIDOT)
++	extern void peridot_log_append(const char *c, int size);  /* bsd/dev/peridot_ufs.c */
++	peridot_log_append(&c, 1);
++#endif
+ 	if (!disableConsoleOutput) {
+ 		console_write_char(c);
+ 	}

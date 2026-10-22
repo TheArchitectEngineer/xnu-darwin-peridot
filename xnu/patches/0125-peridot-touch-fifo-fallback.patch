@@ -1,0 +1,19 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -576,7 +576,15 @@
+ 	    ((tx >> 16) & 0x3fu) >= 2u && ((rx >> 16) & 0x3fu) >= 2u;
+ 	bool proto_ok = ((fw >> 8) & 0xffu) == GENI_PROTO_SPI;
+ 	uint32_t ifd = touch_rd(st.se, 0x64);
+-	if (!fifo_ok || ((!proto_ok) && !force) || ((ifd & 1u) && !force)) {
++	if (ifd & 1u) {
++		/*
++		 * FIFO_IF_DISABLE means the hardware prefers GPI DMA, but Linux
++		 * (spi-geni-qcom.c) falls back to FIFO mode when no DMA channel is
++		 * available, so it is not a reason to give up.
++		 */
++		printf("PERIDOT TOUCH: FIFO interface disabled (ifdisable=%#x); using FIFO mode\n", ifd);
++	}
++	if (!fifo_ok || ((!proto_ok) && !force)) {
+ 		printf("PERIDOT TOUCH: SE4 not SPI-ready (proto=%u fifo=%d ifdisable=%#x force=%d); probes skipped\n",
+ 		    (fw >> 8) & 0xffu, fifo_ok, ifd, force);
+ 		return false;

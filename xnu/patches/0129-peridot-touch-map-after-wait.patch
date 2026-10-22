@@ -1,0 +1,49 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -645,7 +645,7 @@
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+-	unsigned delay_s = 45;
++	unsigned delay_s = 8;
+ 	(void)arg;
+ 	(void)result;
+ 	/*
+@@ -655,21 +655,34 @@
+ 	(void)PE_parse_boot_argn("peridottouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("PERIDOT TOUCH: starting in %u s\n", delay_s);
+ 	/*
+-	 * Map the few register pages we use before userland eats the kernel map.
+-	 * A single 0x60000 mapping panics in kmem_alloc once backboardd is up.
++	 * Map after the wait, not before. io_map() takes the early-bootstrap
++	 * branch (virtual_space_start + pmap_map_bd) while startup_phase is
++	 * below STARTUP_SUB_KMEM; that temporary VA is not durable once
++	 * userland builds its address space, so the first access 45 s later
++	 * takes an SError and hard-resets the phone with no panic. sweet maps
++	 * after the delay for the same reason and the pages are used only below.
+ 	 */
++	touch_wait(delay_s * 1000u);
+ 	printf("PERIDOT TOUCH: mapping TLMM/SE4\n");
+ 	st.se = ml_io_map(TOUCH_SE_PA, 0x1000);
++	printf("PERIDOT TOUCH: map se=%#lx\n", (unsigned long)st.se);
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA + GCC_VOTE_OFF, 0x1000);
++	printf("PERIDOT TOUCH: map gcc=%#lx\n", (unsigned long)st.gcc);
+ 	st.gcc_rcg = ml_io_map(TOUCH_GCC_PA + GCC_RCG_OFF, 0x1000);
++	printf("PERIDOT TOUCH: map gcc_rcg=%#lx\n", (unsigned long)st.gcc_rcg);
+ 	st.gcc_ahb = ml_io_map(TOUCH_GCC_PA + GCC_AHB_OFF, 0x1000);
++	printf("PERIDOT TOUCH: map gcc_ahb=%#lx\n", (unsigned long)st.gcc_ahb);
+ 	st.gpio128 = ml_io_map(TOUCH_TLMM_PA + 128u * 0x1000u, 0x1000);
++	printf("PERIDOT TOUCH: map gpio128=%#lx\n", (unsigned long)st.gpio128);
+ 	st.gpio129 = ml_io_map(TOUCH_TLMM_PA + 129u * 0x1000u, 0x1000);
++	printf("PERIDOT TOUCH: map gpio129=%#lx\n", (unsigned long)st.gpio129);
+ 	if (!st.se || !st.gcc || !st.gcc_rcg || !st.gcc_ahb || !st.gpio128 || !st.gpio129) {
+ 		printf("PERIDOT TOUCH: MMIO mapping failed\n");
+ 		goto out;
+ 	}
+-	touch_wait(delay_s * 1000u);
++	printf("PERIDOT TOUCH: before se read\n");
++	printf("PERIDOT TOUCH: se fw=%#x\n", touch_rd(st.se, SE_FW));
++	printf("PERIDOT TOUCH: before clocks\n");
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}

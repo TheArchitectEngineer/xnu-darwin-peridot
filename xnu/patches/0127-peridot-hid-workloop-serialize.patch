@@ -1,0 +1,71 @@
+--- a/iokit/Kernel/arm/hid/IOHIDEventService.h
++++ b/iokit/Kernel/arm/hid/IOHIDEventService.h
+@@ -59,6 +59,15 @@
+ 	bool                    handleIsOpenLocked(const IOService *client) const;
+ 	virtual void            dispatchEvent(IOHIDEvent *event, IOOptionBits options = 0);
+ 
++	/*
++	 * Serialize a dispatch onto the HID work loop. Hardware drivers call this
++	 * from their own kernel threads; Apple's IOHIDEventService only ever
++	 * dispatches from its work loop, and the user client's command gate and
++	 * queue are not safe against concurrent dispatchers.
++	 */
++	void                    dispatchEventOnWorkLoop(IOHIDEvent *event);
++	static IOReturn         dispatchAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
++
+ 	/* Published as HID properties by start(). */
+ 	virtual OSString *      getTransport();
+ 	virtual OSString *      getProduct();
+--- a/iokit/Kernel/arm/hid/PeridotHID.cpp
++++ b/iokit/Kernel/arm/hid/PeridotHID.cpp
+@@ -222,6 +222,32 @@
+ 	clients->release();
+ }
+ 
++IOReturn
++IOHIDEventService::dispatchAction(OSObject *owner, void *arg0, void *arg1 __unused,
++    void *arg2 __unused, void *arg3 __unused)
++{
++	IOHIDEventService *service = (IOHIDEventService *)owner;
++	IOHIDEvent *event = (IOHIDEvent *)arg0;
++
++	if (service && event) {
++		service->dispatchEvent(event);
++	}
++	return kIOReturnSuccess;
++}
++
++void
++IOHIDEventService::dispatchEventOnWorkLoop(IOHIDEvent *event)
++{
++	if (!event) {
++		return;
++	}
++	if (!_hidGate || !_hidWorkLoop) {
++		dispatchEvent(event);
++		return;
++	}
++	_hidGate->runAction(&IOHIDEventService::dispatchAction, event, NULL, NULL, NULL);
++}
++
+ IOHIDEvent *
+ IOHIDEventService::copyEvent(IOHIDEventType type __unused, IOHIDEvent *matching __unused, IOOptionBits options __unused)
+ {
+@@ -404,7 +430,7 @@
+ 	if (event) {
+ 		IOLog("PERIDOT HID: key 0x%x %s (%u clients)\n", (unsigned)usage, down ? "down" : "up",
+ 		    _clients ? _clients->getCount() : 0);
+-		dispatchEvent(event);
++		dispatchEventOnWorkLoop(event);
+ 		event->release();
+ 	}
+ }
+@@ -544,7 +570,7 @@
+ 		IOLog("PERIDOT HID: touch %d %s at %d,%d%s\n", finger, down ? "down" : "up", x, y,
+ 		    fEdge[finger] ? " edge" : "");
+ 	}
+-	dispatchEvent(collection);
++	dispatchEventOnWorkLoop(collection);
+ 	collection->release();
+ }
+ 

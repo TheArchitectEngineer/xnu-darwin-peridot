@@ -1,0 +1,103 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -76,6 +76,23 @@
+  * MSB-to-LSB, length 8, STOP only on vector 3. FIFO bytes remain LSB first. */
+ #define SE_PACK0        0x0007f8feu
+ #define SE_PACK1        0x000ffefeu
++/*
++ * GENI_FW_REVISION_RO (0x68) [15:8] is the protocol, not a QUP version:
++ * NONE=0 SPI=1 UART=2 I2C=3 I3C=4 (include/linux/soc/qcom/geni-se.h). The
++ * peridot IC (xiaomi_touch@0) hangs off spi@a90000 = GENI SE4 SPI, so the
++ * expected value is SPI (1), not the I2C (3) of the sweet/topaz bring-up.
++ */
++#define GENI_PROTO_SPI  1u
++/* GENI SPI protocol registers (drivers/spi/spi-geni-qcom.c). */
++#define SE_SPI_CPHA     0x224u
++#define SE_SPI_CPOL     0x230u
++#define SE_SPI_DEMUX_SEL 0x250u
++#define SE_SPI_TRANS_CFG 0x25cu
++#define SE_SPI_WORD_LEN 0x268u
++#define SE_SPI_PRE_POST_CMD_DLY 0x274u
++#define SPI_TX_ONLY     (1u << 27)
++#define SPI_RX_ONLY     (2u << 27)
++#define M_CMD_DONE      (1u << 0)
+ 
+ static struct {
+ 	vm_offset_t se;
+@@ -210,6 +227,8 @@
+ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+     unsigned nr, bool stretch)
+ {
++	(void)addr;
++	(void)stretch;
+ 	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
+ 		return EIO;
+ 	}
+@@ -218,10 +237,14 @@
+ 		return EBUSY;
+ 	}
+ 	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
++	/*
++	 * GENI SPI runs the primary sequencer with a TX-only or RX-only opcode
++	 * (no I2C address field). The register address travels as the first TX
++	 * bytes; a read is a separate RX-only transfer after it.
++	 */
+ 	touch_wr(st.se, SE_TX_WM, nt ? 1u : 0u);
+ 	touch_wr(st.se, nr ? SE_RX_LEN : SE_TX_LEN, nr ? nr : nt);
+-	touch_wr(st.se, SE_CMD, ((nr ? 2u : 1u) << 27) |
+-	    ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
++	touch_wr(st.se, SE_CMD, nr ? SPI_RX_ONLY : SPI_TX_ONLY);
+ 	int err = ETIMEDOUT;
+ 	for (unsigned i = 0; i < 20000; ++i) {
+ 		uint32_t irq = touch_irq();
+@@ -488,24 +511,24 @@
+ {
+ 	uint32_t fw = touch_rd(st.se, SE_FW);
+ 	uint32_t tx = touch_rd(st.se, SE_HW_TX), rx = touch_rd(st.se, SE_HW_RX);
+-	printf("PERIDOT TOUCH: se7 fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
++	printf("PERIDOT TOUCH: se4 fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
+ 	    fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
+ 	    touch_rd(st.se, 0x908));
+ 	/*
+-	 * The QUP wrapper and GENI are outside this SE page; read them so the
+-	 * next boot shows whether ABL left QUPv3 configured (proto 3) or the
+-	 * block is unclocked (reads back a default 0x102).
++	 * GENI_FW_REVISION_RO[15:8] is the protocol. peridot's IC is on GENI SE4
++	 * SPI, so the expected value is SPI (1). Keep the QUP/GENI state in the
++	 * log so an unclocked block (which reads back a default 0x102) is obvious.
+ 	 */
+-	printf("PERIDOT TOUCH: geni se_geni=%#x out=%#x m_irq=%#x s_irq=%#x io=%#x ver=%#x\n",
+-	    touch_rd(st.se, 0x0), touch_rd(st.se, 0x4), touch_rd(st.se, 0x20),
+-	    touch_rd(st.se, 0x24), touch_rd(st.se, 0x908), touch_rd(st.se, 0x0));
++	printf("PERIDOT TOUCH: geni se_geni=%#x out=%#x m_irq=%#x s_irq=%#x clk_sel=%#x\n",
++	    touch_rd(st.se, 0x0), touch_rd(st.se, 0x24), touch_rd(st.se, 0x610),
++	    touch_rd(st.se, 0x640), touch_rd(st.se, SE_CLK_SEL));
+ 	int force = 0;
+ 	(void)PE_parse_boot_argn("peridottouchforce", &force, sizeof(force));
+ 	bool fifo_ok = ((tx >> 24) & 0x3fu) == 32u && ((rx >> 24) & 0x3fu) == 32u &&
+ 	    ((tx >> 16) & 0x3fu) >= 2u && ((rx >> 16) & 0x3fu) >= 2u;
+-	bool proto_ok = ((fw >> 8) & 0xffu) == 3u;
++	bool proto_ok = ((fw >> 8) & 0xffu) == GENI_PROTO_SPI;
+ 	if (!fifo_ok || ((!proto_ok) && !force) || (touch_rd(st.se, 0x64) & 1u)) {
+-		printf("PERIDOT TOUCH: SE4 not ABL-ready (proto=%u fifo=%d force=%d); probes skipped\n",
++		printf("PERIDOT TOUCH: SE4 not SPI-ready (proto=%u fifo=%d force=%d); probes skipped\n",
+ 		    (fw >> 8) & 0xffu, fifo_ok, force);
+ 		return false;
+ 	}
+@@ -528,8 +551,14 @@
+ 	touch_wr(st.se, 0x20, 1);
+ 	touch_wr(st.se, SE_CLK_SEL, 0);
+ 	touch_wr(st.se, SE_MCLK, (7u << 4) | 1u);
+-	touch_wr(st.se, SE_SCL, (10u << 20) | (11u << 10) | 26u); /* 100 kHz */
+-	/* Linux 8-bit I2C packing: MSB on the wire, LSB byte first in FIFO. */
++	/* GENI SPI: 8-bit words, chip-select 0, mode 0 (CPOL=CPHA=0). */
++	touch_wr(st.se, SE_SPI_WORD_LEN, (8u - 8u) & 0x1fu);
++	touch_wr(st.se, SE_SPI_DEMUX_SEL, 0);
++	touch_wr(st.se, SE_SPI_CPOL, 0);
++	touch_wr(st.se, SE_SPI_CPHA, 0);
++	touch_wr(st.se, SE_SPI_TRANS_CFG, touch_rd(st.se, SE_SPI_TRANS_CFG));
++	touch_wr(st.se, SE_SPI_PRE_POST_CMD_DLY, 0);
++	/* geni_se_config_packing(8, 4, msb_first, tx, rx): 4 bytes per FIFO word. */
+ 	touch_wr(st.se, 0x254, 0);
+ 	touch_wr(st.se, 0x260, SE_PACK0);
+ 	touch_wr(st.se, 0x264, SE_PACK1);

@@ -1,0 +1,47 @@
+--- a/bsd/dev/peridot_keys.c
++++ b/bsd/dev/peridot_keys.c
+@@ -17,9 +17,15 @@
+ extern void peridot_hid_key(int key, int down);
+ void peridot_keys_init(void);
+ 
+-#define KEYS_CORE_PA     0x0c440000u
+-#define KEYS_OBS_PA      0x0e600000u
+-#define KEYS_CNFG_PA     0x0c40a000u
++/*
++ * peridot.dts qcom,spmi@c42d000 reg-names cnfg/core/chnls/obsrvr/intr:
++ * cnfg 0xc42d000, core 0xc400000, obsrvr 0xc440000. The sweet addresses
++ * (core 0xc440000, obsrvr 0xe600000, cnfg 0xc40a000) read the arbiter
++ * version out of the wrong region, so peridot keys never came up.
++ */
++#define KEYS_CORE_PA     0x0c400000u
++#define KEYS_OBS_PA      0x0c440000u
++#define KEYS_CNFG_PA     0x0c42d000u
+ #define KEYS_PON_RT      0x0810u
+ #define KEYS_GPIO_RT     0xc110u
+ #define KEYS_NO_APID     0xffffu
+@@ -43,8 +49,10 @@
+ keys_find_apid(uint16_t ppid, uint32_t count)
+ {
+ 	uint16_t found = KEYS_NO_APID;
++	/* APID ownership table: v5 at core+0x900, v7 at core+0x2000 (Linux). */
++	uint32_t mapoff = keys_version >= 0x70000000u ? 0x2000u : 0x900u;
+ 	for (uint32_t i = 0; i < count; ++i) {
+-		uint32_t map = keys_rd(keys_core, 0x900u + 4u * i);
++		uint32_t map = keys_rd(keys_core, mapoff + 4u * i);
+ 		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
+ 			continue;
+ 		}
+@@ -145,8 +153,11 @@
+ 	}
+ 	keys_version = keys_rd(keys_core, 0);
+ 	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
+-	if (keys_version < 0x50000000u || keys_version >= 0x70000000u ||
+-	    count == 0 || count > 512) {
++	printf("PERIDOT KEYS: arb version=%#x apids=%u core=%#x obs=%#x cnfg=%#x\n",
++	    keys_version, count, keys_rd(keys_core, 0), keys_rd(keys_obs, 0),
++	    keys_rd(keys_cnfg, 0));
++	/* Linux: v2 is the floor (0x20010000); v5 divides APID space (>= 0x50000000). */
++	if (keys_version < 0x20010000u || count == 0 || count > 512) {
+ 		printf("PERIDOT KEYS: unsupported arbiter version=%#x apids=%u\n",
+ 		    keys_version, count);
+ 		return;

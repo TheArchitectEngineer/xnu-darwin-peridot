@@ -1,0 +1,65 @@
+--- a/bsd/dev/peridot_keys.c
++++ b/bsd/dev/peridot_keys.c
+@@ -52,16 +52,12 @@
+ #define KEYS_STATUS_DONE     0x1u
+ #define KEYS_STATUS_FAIL     0x0eu
+ 
+-#define KEYS_MAPPING_INDEX(x)     (((x) >> 18) & 0xfu)
+-#define KEYS_MAPPING_IS0_FLAG(x)  (((x) >> 17) & 0x1u)
+-#define KEYS_MAPPING_IS0_RES(x)   (((x) >> 9) & 0xffu)
+-#define KEYS_MAPPING_IS1_FLAG(x)  (((x) >> 8) & 0x1u)
+-#define KEYS_MAPPING_IS1_RES(x)   (((x) >> 0) & 0xffu)
+-#define KEYS_MAPPING_DEPTH        16u
++/* PMIC_ARB_PPID_MASK: PPID is 12 bit (SID in [11:8], register in the low byte). */
++#define KEYS_PPID_MASK       0xfffu
+ 
+ static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID, keys_volup_apid = KEYS_NO_APID;
+-static uint32_t keys_version, keys_last_status;
++static uint32_t keys_version, keys_last_status, keys_apid_count;
+ static bool keys_started;
+ static int keys_sleep_chan;
+ 
+@@ -74,27 +70,17 @@
+ }
+ 
+ /*
+- * v7 maps PPID to APID through a 16-deep binary search tree in the cnfg
+- * region; a leaf encodes the APID. See pmic_arb_ppid_to_apid_v5/v7.
++ * v5/v7 map PPID to APID by scanning the per-APID map in the core region
++ * (pmic_arb_read_apid_map_v5): a non-zero entry at core + 0x2000 + 4*apid
++ * carries the PPID in [15:8]. Return the first APID bound to the PPID.
+  */
+ static uint16_t
+ keys_ppid_to_apid(uint16_t ppid)
+ {
+-	uint32_t index = 0;
+-	for (unsigned i = 0; i < KEYS_MAPPING_DEPTH; ++i) {
+-		uint32_t data = keys_rd(keys_cnfg, KEYS_MAPPING_TABLE + 4u * index);
+-		if (ppid & (1u << KEYS_MAPPING_INDEX(data))) {
+-			if (KEYS_MAPPING_IS1_FLAG(data)) {
+-				index = KEYS_MAPPING_IS1_RES(data);
+-			} else {
+-				return (uint16_t)KEYS_MAPPING_IS1_RES(data);
+-			}
+-		} else {
+-			if (KEYS_MAPPING_IS0_FLAG(data)) {
+-				index = KEYS_MAPPING_IS0_RES(data);
+-			} else {
+-				return (uint16_t)KEYS_MAPPING_IS0_RES(data);
+-			}
++	for (uint32_t apid = 0; apid < keys_apid_count; ++apid) {
++		uint32_t regval = keys_rd(keys_core, KEYS_APID_MAP_V7 + 4u * apid);
++		if (regval && ((regval >> 8) & KEYS_PPID_MASK) == (uint32_t)ppid) {
++			return (uint16_t)apid;
+ 		}
+ 	}
+ 	return KEYS_NO_APID;
+@@ -196,6 +182,7 @@
+ 		    keys_version, count);
+ 		return;
+ 	}
++	keys_apid_count = count;
+ 	keys_pon_apid = keys_ppid_to_apid((uint16_t)((KEYS_PON_SID << 8) |
+ 	    (KEYS_PON_RT >> 8)));
+ 	keys_volup_apid = keys_ppid_to_apid((uint16_t)((KEYS_VOLUP_SID << 8) |
