@@ -1,0 +1,82 @@
+--- a/bsd/dev/peridot_touch.c
++++ b/bsd/dev/peridot_touch.c
+@@ -35,6 +35,14 @@
+ #define GOODIX_EVENT_REG 0x4180u
+ #define GOODIX_HEAD_LEN  8u
+ #define GOODIX_POINT_LEN 8u
++/*
++ * peridot.dts xiaomi_touch: goodix,panel-max-x = 0x4c40 (19520),
++ * goodix,panel-max-y = 0xa980 (43392), super-resolution-factor = 0x10 (16).
++ * The IC reports panel pixels * 16, so divide to get 1220x2712 panel pixels.
++ */
++#define PERIDOT_TOUCH_SUPER_RES 16u
++#define PERIDOT_TOUCH_RAW_MAX_X (1220u * PERIDOT_TOUCH_SUPER_RES)
++#define PERIDOT_TOUCH_RAW_MAX_Y (2712u * PERIDOT_TOUCH_SUPER_RES)
+ 
+ #define SE_STATUS       0x040u
+ #define SE_MCLK         0x048u
+@@ -413,13 +421,13 @@
+ 		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
+ 		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+ 		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+-		    (mask & (1u << id)) || px > 1079 || py > 2399) {
++		    (mask & (1u << id)) || px > PERIDOT_TOUCH_RAW_MAX_X || py > PERIDOT_TOUCH_RAW_MAX_Y) {
+ 			(void)touch_goodix_ack();
+ 			return EIO;
+ 		}
+ 		mask |= 1u << id;
+-		x[id] = (int)px;
+-		y[id] = (int)py;
++		x[id] = (int)(px / PERIDOT_TOUCH_SUPER_RES);
++		y[id] = (int)(py / PERIDOT_TOUCH_SUPER_RES);
+ 	}
+ 	err = touch_goodix_ack();
+ 	if (!err) {
+@@ -460,12 +468,12 @@
+ 		}
+ 		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
+ 		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
+-		if (px > 1079 || py > 2399) {
++		if (px > PERIDOT_TOUCH_RAW_MAX_X || py > PERIDOT_TOUCH_RAW_MAX_Y) {
+ 			return EIO;
+ 		}
+ 		mask |= 1u << id;
+-		x[id] = (int)px;
+-		y[id] = (int)py;
++		x[id] = (int)(px / PERIDOT_TOUCH_SUPER_RES);
++		y[id] = (int)(py / PERIDOT_TOUCH_SUPER_RES);
+ 		++active;
+ 	}
+ 	if (active != n) {
+@@ -483,12 +491,27 @@
+ 	printf("PERIDOT TOUCH: se7 fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
+ 	    fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
+ 	    touch_rd(st.se, 0x908));
+-	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, 0x64) & 1u) ||
+-	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
+-	    ((tx >> 16) & 0x3fu) < 2u || ((rx >> 16) & 0x3fu) < 2u) {
+-		printf("PERIDOT TOUCH: need ABL-loaded I2C firmware and 32-bit FIFOs; probes skipped\n");
++	/*
++	 * The QUP wrapper and GENI are outside this SE page; read them so the
++	 * next boot shows whether ABL left QUPv3 configured (proto 3) or the
++	 * block is unclocked (reads back a default 0x102).
++	 */
++	printf("PERIDOT TOUCH: geni se_geni=%#x out=%#x m_irq=%#x s_irq=%#x io=%#x ver=%#x\n",
++	    touch_rd(st.se, 0x0), touch_rd(st.se, 0x4), touch_rd(st.se, 0x20),
++	    touch_rd(st.se, 0x24), touch_rd(st.se, 0x908), touch_rd(st.se, 0x0));
++	int force = 0;
++	(void)PE_parse_boot_argn("peridottouchforce", &force, sizeof(force));
++	bool fifo_ok = ((tx >> 24) & 0x3fu) == 32u && ((rx >> 24) & 0x3fu) == 32u &&
++	    ((tx >> 16) & 0x3fu) >= 2u && ((rx >> 16) & 0x3fu) >= 2u;
++	bool proto_ok = ((fw >> 8) & 0xffu) == 3u;
++	if (!fifo_ok || ((!proto_ok) && !force) || (touch_rd(st.se, 0x64) & 1u)) {
++		printf("PERIDOT TOUCH: SE4 not ABL-ready (proto=%u fifo=%d force=%d); probes skipped\n",
++		    (fw >> 8) & 0xffu, fifo_ok, force);
+ 		return false;
+ 	}
++	if (!proto_ok) {
++		printf("PERIDOT TOUCH: proto override (%u) via peridottouchforce\n", (fw >> 8) & 0xffu);
++	}
+ 	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
+ 		printf("PERIDOT TOUCH: SE4 already busy; probes skipped\n");
+ 		return false;

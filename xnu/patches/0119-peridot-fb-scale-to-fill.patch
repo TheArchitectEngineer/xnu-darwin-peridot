@@ -1,0 +1,109 @@
+--- a/iokit/Kernel/arm/PeridotFramebuffer.cpp
++++ b/iokit/Kernel/arm/PeridotFramebuffer.cpp
+@@ -405,42 +405,82 @@
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
+-		/* Logical (presented) display coordinates -> panel coordinates. */
+-		dx -= fOffX;
+-		dy -= fOffY;
+-		if (dx < 0) {
+-			sx -= dx;
+-			w += dx;
+-			dx = 0;
+-		}
+-		if (dy < 0) {
+-			sy -= dy;
+-			h += dy;
+-			dy = 0;
++		/*
++		 * The userland composites in logical (presented) coordinates and the
++		 * panel is a different size (1220x2712 vs the presented 1125x2436), so
++		 * map the whole logical display onto the whole panel: nearest-neighbour
++		 * scale-to-fill. fOffX/fOffY would only letterbox it.
++		 */
++		if (s->width == 0 || s->height == 0) {
++			s->release();
++			continue;
++		}
++		int32_t pdx = (int32_t)((int64_t)dx * fWidth / (int32_t)s->width);
++		int32_t pdy = (int32_t)((int64_t)dy * fHeight / (int32_t)s->height);
++		int32_t pw = (int32_t)((int64_t)w * fWidth / (int32_t)s->width);
++		int32_t ph = (int32_t)((int64_t)h * fHeight / (int32_t)s->height);
++		(void)fOffX;
++		(void)fOffY;
++		if (sx < 0) {
++			sx = 0;
++		}
++		if (sy < 0) {
++			sy = 0;
++		}
++		if (pdx < 0) {
++			pdx = 0;
++		}
++		if (pdy < 0) {
++			pdy = 0;
++		}
++		if (pw <= 0 || ph <= 0 || sx >= (int32_t)s->width || sy >= (int32_t)s->height) {
++			s->release();
++			continue;
+ 		}
+-		if (w > (int32_t)s->width - sx) {
++		if (sx + w > (int32_t)s->width) {
+ 			w = (int32_t)s->width - sx;
+ 		}
+-		if (h > (int32_t)s->height - sy) {
++		if (sy + h > (int32_t)s->height) {
+ 			h = (int32_t)s->height - sy;
+ 		}
+-		if (w > (int32_t)fWidth - dx) {
+-			w = (int32_t)fWidth - dx;
++		if (pdx + pw > (int32_t)fWidth) {
++			pw = (int32_t)fWidth - pdx;
+ 		}
+-		if (h > (int32_t)fHeight - dy) {
+-			h = (int32_t)fHeight - dy;
++		if (pdy + ph > (int32_t)fHeight) {
++			ph = (int32_t)fHeight - pdy;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+-		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+-		    s->memory == NULL || last > s->memory->getLength()) {
++		if (pw <= 0 || ph <= 0 || w <= 0 || h <= 0 ||
++		    s->elementWidth != 1 || s->elementHeight != 1 ||
++		    s->memory == NULL || last > s->memory->getLength() ||
++		    pdx >= (int32_t)fWidth || pdy >= (int32_t)fHeight) {
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
+-			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4);
++			bool oneToOne = (pw == w && ph == h);
++			if (oneToOne) {
++				for (int32_t y = 0; y < h; y++) {
++					memcpy((void *)(fPixels + (uint64_t)(pdy + y) * fRowBytes + (uint64_t)pdx * 4),
++					    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
++					    (size_t)w * 4);
++				}
++			} else {
++				uint32_t *col = (uint32_t *)IOMalloc((size_t)pw * 4);
++				if (col != NULL) {
++					for (int32_t y = 0; y < ph; y++) {
++						int32_t syy = sy + (int32_t)(((int64_t)y * h) / ph);
++						const uint32_t *srow = (const uint32_t *)(src + s->offset +
++						    (uint64_t)syy * s->bytesPerRow);
++						for (int32_t x = 0; x < pw; x++) {
++							int32_t sxx = sx + (int32_t)(((int64_t)x * w) / pw);
++							col[x] = srow[sxx];
++						}
++						memcpy((void *)(fPixels + (uint64_t)(pdy + y) * fRowBytes + (uint64_t)pdx * 4),
++						    col, (size_t)pw * 4);
++					}
++					IOFree(col, (size_t)pw * 4);
++				}
+ 			}
+ 		}
+ 		s->release();
